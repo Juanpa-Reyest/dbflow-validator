@@ -175,28 +175,48 @@ func (r *ContainerRunner) Run(
 	trace := capture.String()
 	elapsed := time.Since(start)
 
+	// Inspect the container's exit code.
+	exitCode := 0
+	state, stateErr := c.State(ctx)
+	if stateErr != nil {
+		// Cannot determine exit code — treat as failure.
+		exitCode = 1
+	} else {
+		exitCode = state.ExitCode
+	}
+
+	return MapContainerResult(exitCode, trace, goal, elapsed, ctx.Err()), nil
+}
+
+// MapContainerResult converts the raw container outcome (exit code, captured
+// stdout/stderr trace, context error) into a domain.StepResult.
+//
+// Mapping rules:
+//   - ctx cancelled/deadline → StepStatusAborted
+//   - exitCode != 0          → StepStatusFailed  (error includes exit code)
+//   - "BUILD FAILURE" in trace AND exitCode == 0 → StepStatusFailed
+//   - exitCode == 0 AND no BUILD FAILURE          → StepStatusPassed
+//
+// This function is exported so it can be unit-tested directly without spinning
+// up a real Docker container (see container_runner_test.go).
+func MapContainerResult(
+	exitCode int,
+	trace string,
+	goal string,
+	elapsed time.Duration,
+	ctxErr error,
+) domain.StepResult {
 	result := domain.StepResult{
 		Name:       goal,
 		Duration:   elapsed,
 		DurationMs: elapsed.Milliseconds(),
 	}
 
-	// Check for context cancellation.
-	if ctx.Err() != nil {
+	if ctxErr != nil {
 		result.Status = domain.StepStatusAborted
-		result.Error = fmt.Sprintf("context cancelled: %v", ctx.Err())
+		result.Error = fmt.Sprintf("context cancelled: %v", ctxErr)
 		result.Trace = trace
-		return result, nil
-	}
-
-	// Inspect the container's exit code.
-	state, stateErr := c.State(ctx)
-	exitCode := 0
-	if stateErr != nil {
-		// Cannot determine exit code — treat as failure.
-		exitCode = 1
-	} else {
-		exitCode = state.ExitCode
+		return result
 	}
 
 	if exitCode != 0 || strings.Contains(trace, "BUILD FAILURE") {
@@ -207,12 +227,12 @@ func (r *ContainerRunner) Run(
 			result.Error = "BUILD FAILURE detected in Maven output"
 		}
 		result.Trace = trace
-		return result, nil
+		return result
 	}
 
 	result.Status = domain.StepStatusPassed
 	result.Trace = trace
-	return result, nil
+	return result
 }
 
 // Ensure ContainerRunner satisfies domain.MavenRunner at compile time.
