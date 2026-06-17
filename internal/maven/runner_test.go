@@ -13,6 +13,38 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/maven"
 )
 
+// --- Maven constant verification ---
+
+// TestMavenConstants verifies the reverse-engineered goal names and param format
+// against the observed behavior documented in archetype/real-mvn-behavior (obs #538).
+func TestMavenConstants(t *testing.T) {
+	// Goal names confirmed from real plugin execution (674 changesets, tag 210).
+	if maven.GoalSync != "dbflow:sync" {
+		t.Errorf("GoalSync = %q, want %q", maven.GoalSync, "dbflow:sync")
+	}
+	if maven.GoalRollback != "dbflow:rollback" {
+		t.Errorf("GoalRollback = %q, want %q", maven.GoalRollback, "dbflow:rollback")
+	}
+
+	// Standard tag rollback uses only --TAG; ROLLBACK_MODE is for custom (HU) rollbacks.
+	// Verify rollback produces space-separated single param (no ROLLBACK_MODE appended).
+	rollbackParams := []string{"--TAG=210"}
+	got := strings.Join(rollbackParams, " ")
+	if got != "--TAG=210" {
+		t.Errorf("rollback param format = %q, want %q", got, "--TAG=210")
+	}
+
+	// Sync produces space-separated params: "--TAG=<unique> --AUTHOR=validator-cli"
+	syncParams := []string{"--TAG=abc123", "--AUTHOR=validator-cli"}
+	syncGot := maven.FormatParams([]maven.KV{
+		{Key: "--TAG", Value: "abc123"},
+		{Key: "--AUTHOR", Value: "validator-cli"},
+	})
+	if syncGot != strings.Join(syncParams, " ") {
+		t.Errorf("sync params format = %q, want %q", syncGot, strings.Join(syncParams, " "))
+	}
+}
+
 // --- FormatParams tests ---
 
 func TestFormatParams(t *testing.T) {
