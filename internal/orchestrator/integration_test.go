@@ -11,13 +11,13 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/config"
 	"github.com/dbflow-validator/dbflow-validator/internal/container"
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
+	"github.com/dbflow-validator/dbflow-validator/internal/embedrepo"
 	"github.com/dbflow-validator/dbflow-validator/internal/engine"
 	internalgit "github.com/dbflow-validator/dbflow-validator/internal/git"
 	"github.com/dbflow-validator/dbflow-validator/internal/liquibase"
 	"github.com/dbflow-validator/dbflow-validator/internal/maven"
 	"github.com/dbflow-validator/dbflow-validator/internal/orchestrator"
 	"github.com/dbflow-validator/dbflow-validator/internal/preflight"
-	internalvendor "github.com/dbflow-validator/dbflow-validator/internal/vendor"
 )
 
 // TestEndToEnd_HappyPath runs the REAL flow against the reference archetype
@@ -100,18 +100,14 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	// (avoids needing a real git remote for the e2e test).
 	fakeCloner := &localCloner{root: tmpArchetype}
 
-	// Resolve vendored Maven repo from project root.
-	// The test binary runs from internal/orchestrator/ which is 2 levels deep
-	// inside the project root (dbflow-validator/). Go up 2 levels, not 3.
-	projectRoot := filepath.Join("..", "..")
-	projectRootAbs, _ := filepath.Abs(projectRoot)
-	mavenRepoCachePath := ""
-	if repoPath, err := internalvendor.FindVendorRepository(projectRootAbs); err == nil {
-		mavenRepoCachePath = repoPath
-		t.Logf("using vendored Maven repo: %s", mavenRepoCachePath)
-	} else {
-		t.Logf("mvn-vendor/repository not found (%v); Maven container will have no /m2 mount", err)
+	// Extract the embedded vendored Maven repo to a temp cache dir.
+	// This validates the full embedded-cache path (no host mvn/JVM required).
+	embeddedCacheRoot := t.TempDir()
+	mavenRepoCachePath, extractErr := embedrepo.EnsureExtracted(embeddedCacheRoot, "test")
+	if extractErr != nil {
+		t.Fatalf("extract embedded Maven repo: %v", extractErr)
 	}
+	t.Logf("using embedded Maven repo cache: %s", mavenRepoCachePath)
 
 	// Maven runs inside a container on the shared Docker network.
 	// Host Maven/JVM are NOT used — this validates the zero-friction distribution path.
