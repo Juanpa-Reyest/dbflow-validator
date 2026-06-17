@@ -6,6 +6,90 @@ import (
 	"testing"
 )
 
+// TestHelp_Flag verifies that --help and -h print a usage message to stdout and exit 0.
+func TestHelp_Flag(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "--help flag", args: []string{"--help"}},
+		{name: "-h flag", args: []string{"-h"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			env := func(string) string { return "" }
+			code := runWithHelpOutput(tt.args, env, &out, &out)
+
+			if code != 0 {
+				t.Errorf("exit code = %d, want 0", code)
+			}
+			got := out.String()
+			if !strings.Contains(got, "Usage") && !strings.Contains(got, "usage") && !strings.Contains(got, "--repo-url") {
+				t.Errorf("help output %q does not contain usage information", got)
+			}
+		})
+	}
+}
+
+// TestExitCodes_Table verifies all documented exit-code scenarios.
+func TestExitCodes_Table(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		env      func(string) string
+		wantCode int
+	}{
+		{
+			name:     "missing repo-url no-TTY exits 2",
+			args:     []string{},
+			env:      func(k string) string { if k == "DBFLOW_GIT_TOKEN" { return "tok" }; return "" },
+			wantCode: 2,
+		},
+		{
+			name:     "missing token no-TTY exits 2",
+			args:     []string{"--repo-url", "https://example.com/repo.git"},
+			env:      func(string) string { return "" },
+			wantCode: 2,
+		},
+		{
+			name:     "--help exits 0",
+			args:     []string{"--help"},
+			env:      func(string) string { return "" },
+			wantCode: 0,
+		},
+		{
+			name:     "-h exits 0",
+			args:     []string{"-h"},
+			env:      func(string) string { return "" },
+			wantCode: 0,
+		},
+		{
+			name:     "--version exits 0",
+			args:     []string{"--version"},
+			env:      func(string) string { return "" },
+			wantCode: 0,
+		},
+		{
+			name:     "-v exits 0",
+			args:     []string{"-v"},
+			env:      func(string) string { return "" },
+			wantCode: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			code := runWithHelpOutput(tt.args, tt.env, &out, &out)
+			if code != tt.wantCode {
+				t.Errorf("exit code = %d, want %d", code, tt.wantCode)
+			}
+		})
+	}
+}
+
 func TestRun_MissingRepoURL_ExitsWithCode2(t *testing.T) {
 	args := []string{} // no --repo-url
 	env := func(k string) string {

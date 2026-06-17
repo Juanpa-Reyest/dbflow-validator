@@ -38,23 +38,77 @@ import (
 // Falls back to "dev" when not set (go run / go test without ldflags).
 var buildVersion = "dev"
 
+// usageText is the help text printed when --help / -h is requested.
+const usageText = `dbflow-validator — validate a PostgreSQL Maven DB archetype
+
+Usage:
+  dbflow-validator --repo-url <url> [flags]
+  dbflow-validator              (interactive TTY: prompts for URL and token)
+
+Flags:
+  --repo-url      string   Git repository URL to clone and validate (required, or interactive)
+  --base-branch   string   Branch to validate (default: integracion)
+  --output-format string   Output format: console or json (default: console)
+  --output-file   string   Path to write JSON output (optional)
+  --log-level     string   Log verbosity: debug, info, warn, error (default: info)
+  --version / -v           Print version and exit
+  --help / -h              Print this help and exit
+
+Environment variables:
+  DBFLOW_GIT_TOKEN   Git access token (alternative to interactive prompt; never logged)
+
+Examples:
+  # Non-interactive (flags + env var):
+  DBFLOW_GIT_TOKEN=<token> dbflow-validator \
+    --repo-url https://github.com/org/db-artifacts-myproject.git \
+    --base-branch integracion \
+    --output-format console
+
+  # JSON output to file:
+  DBFLOW_GIT_TOKEN=<token> dbflow-validator \
+    --repo-url https://github.com/org/db-artifacts-myproject.git \
+    --output-format json \
+    --output-file result.json
+
+  # Interactive (TTY): prompts for URL and token when not provided:
+  dbflow-validator
+
+Exit codes:
+  0   Validation PASSED
+  1   Validation FAILED
+  2   Configuration or usage error
+  130 Aborted by SIGINT/SIGTERM
+`
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Getenv))
 }
 
 // run is the testable entry point. It returns the process exit code.
-// Version output goes to os.Stdout.
+// Version and help output go to os.Stdout.
 func run(args []string, env func(string) string) int {
-	return runWithOutput(args, env, os.Stdout)
+	return runWithHelpOutput(args, env, os.Stdout, os.Stdout)
 }
 
-// runWithOutput is the fully injectable entry point used by tests.
-// versionOut receives the version line when --version / -v is requested.
+// runWithOutput is kept for backward compatibility with existing tests.
+// helpOut and versionOut are both directed to the same writer.
 func runWithOutput(args []string, env func(string) string, versionOut io.Writer) int {
-	// Handle --version / -v before flag parsing so it always works regardless of
-	// other flag state and never triggers "flag provided but not defined" errors.
+	return runWithHelpOutput(args, env, versionOut, versionOut)
+}
+
+// runWithHelpOutput is the fully injectable entry point used by tests.
+// helpOut receives the help text when --help / -h is requested.
+// versionOut receives the version line when --version / -v is requested.
+func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer, versionOut io.Writer) int {
+	// Handle --help / -h and --version / -v before flag parsing so they always
+	// work regardless of other flag state and never trigger "flag provided but
+	// not defined" errors.
 	for _, a := range args {
-		if a == "--version" || a == "-v" {
+		switch a {
+		case "--help", "-h":
+			fmt.Fprint(helpOut, usageText)
+			return 0
+		case "--version", "-v":
 			fmt.Fprintf(versionOut, "dbflow-validator %s\n", buildVersion)
 			return 0
 		}

@@ -44,7 +44,7 @@ Copy `dist/dbflow-validator-windows-amd64.exe` to a directory that is on your `P
 When `--repo-url` and `DBFLOW_GIT_TOKEN` are not provided and stdin is a terminal, the tool prompts for them:
 
 ```
-$ dbflow-validator validate
+$ dbflow-validator
 Repository URL: https://github.com/org/db-artifacts-myproject.git
 Git access token (hidden):
 ```
