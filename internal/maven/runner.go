@@ -45,6 +45,11 @@ func FormatParams(pairs []KV) string {
 }
 
 // Runner executes Maven goals using exec.CommandContext.
+//
+// Deprecated: production code uses ContainerRunner. This type is retained
+// because the unit tests in runner_test.go use fake mvn scripts to verify
+// exit-code and BUILD FAILURE mapping logic without requiring Docker.
+// Do not use Runner in new production code.
 type Runner struct {
 	// mvnBin is the path to the mvn binary. Defaults to "mvn" (resolved via PATH).
 	mvnBin string
