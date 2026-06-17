@@ -1,6 +1,11 @@
 // Package maven executes Maven goals in a cloned repository.
-// Goal names and ROLLBACK_MODE are kept as named constants to isolate
+// Goal names and param format are kept as named constants to isolate
 // reverse-engineered values from the plugin com.gs.ftt.coe-ds:relational-db-release-manager-plugin.
+//
+// IMPORTANT — param format discovery:
+// The plugin's ParamParser regex is `--(\\w+)(?:=(.*?)(?=\\s+--|$))?`
+// which matches SPACE-separated --KEY=VALUE tokens, not comma-separated.
+// Example: `--TAG=abc123 --AUTHOR=validator-cli`
 package maven
 
 import (
@@ -16,13 +21,13 @@ import (
 )
 
 // Reverse-engineered Maven goal names for the relational-db-release-manager-plugin.
-// Validate against both archetypes at integration time.
 const (
 	GoalSync     = "dbflow:sync"
 	GoalRollback = "dbflow:rollback"
 )
 
-// RollbackModeStandard is the ROLLBACK_MODE value observed in GHA workflows.
+// RollbackModeStandard is the TYPE_ROLLBACK value for a standard tag-based rollback.
+// NOTE: the plugin uses TYPE_ROLLBACK internally; keep this for reference even if unused.
 const RollbackModeStandard = "Standard"
 
 // KV is a key-value pair used to build the -Dparams argument.
@@ -31,21 +36,21 @@ type KV struct {
 	Value string
 }
 
-// FormatParams converts an ordered slice of KV pairs into a comma-separated
+// FormatParams converts an ordered slice of KV pairs into a space-separated
 // params string suitable for -Dparams="...".
-// Example: [{--TAG 210} {--ROLLBACK_MODE Standard}] → "--TAG=210,--ROLLBACK_MODE=Standard"
+// The plugin ParamParser regex splits on spaces between -- tokens.
+// Example: [{--TAG abc123} {--AUTHOR validator-cli}] → "--TAG=abc123 --AUTHOR=validator-cli"
 func FormatParams(pairs []KV) string {
 	parts := make([]string, len(pairs))
 	for i, kv := range pairs {
 		parts[i] = kv.Key + "=" + kv.Value
 	}
-	return strings.Join(parts, ",")
+	return strings.Join(parts, " ")
 }
 
 // Runner executes Maven goals using exec.CommandContext.
 type Runner struct {
 	// mvnBin is the path to the mvn binary. Defaults to "mvn" (resolved via PATH).
-	// Set to a fake binary path in tests.
 	mvnBin string
 }
 
@@ -58,10 +63,11 @@ func NewRunner(mvnBin string) *Runner {
 	return &Runner{mvnBin: mvnBin}
 }
 
-// Run executes mvn -f <cloneRoot>/pom.xml -B <goal> -Dparams="<formatted pairs>"
+// Run executes mvn -f <cloneRoot>/pom.xml -B <goal> -Dparams="<space-separated params>"
 // in the cloned directory. It streams output to out AND captures it internally for
-// the trace. The TAG param is always injected as unique (RFC3339Nano timestamp)
-// unless already present in pairs.
+// the trace. A unique TAG is always prepended to the params unless one is already present.
+//
+// params is a slice of pre-formatted "--KEY=VALUE" strings.
 //
 // Exit-code mapping:
 //   - exit 0 AND no "BUILD FAILURE" in stdout → StepStatusPassed
@@ -72,16 +78,16 @@ func (r *Runner) Run(
 	ctx context.Context,
 	cloneRoot string,
 	goal string,
-	params []KV,
+	params []string,
 	out io.Writer,
 ) (domain.StepResult, error) {
 	start := time.Now()
 
-	// Inject unique TAG if not provided (sync goal uses this).
+	// Inject unique TAG if not already present.
 	uniqueTag := time.Now().Format(time.RFC3339Nano)
-	finalParams := ensureTag(params, uniqueTag)
+	finalParams := ensureTagStr(params, uniqueTag)
 
-	paramStr := FormatParams(finalParams)
+	paramStr := strings.Join(finalParams, " ")
 
 	pomPath := cloneRoot + "/pom.xml"
 	args := []string{
@@ -138,16 +144,19 @@ func (r *Runner) Run(
 	return result, nil
 }
 
-// ensureTag returns params unchanged if a --TAG key is already present,
+// ensureTagStr returns params unchanged if a --TAG= entry is already present,
 // otherwise prepends --TAG=<uniqueTag> at the front.
-func ensureTag(params []KV, uniqueTag string) []KV {
-	for _, kv := range params {
-		if kv.Key == "--TAG" {
+func ensureTagStr(params []string, uniqueTag string) []string {
+	for _, p := range params {
+		if strings.HasPrefix(p, "--TAG=") {
 			return params
 		}
 	}
-	tagged := make([]KV, 0, len(params)+1)
-	tagged = append(tagged, KV{Key: "--TAG", Value: uniqueTag})
-	tagged = append(tagged, params...)
-	return tagged
+	result := make([]string, 0, len(params)+1)
+	result = append(result, "--TAG="+uniqueTag)
+	result = append(result, params...)
+	return result
 }
+
+// Ensure Runner satisfies domain.MavenRunner at compile time.
+var _ domain.MavenRunner = (*Runner)(nil)

@@ -1,0 +1,12 @@
+
+=== PASSED ===
+Repo:       https://example.com/repo.git
+Branch:     main
+Duration:   6010 ms
+
+Steps:
+  [PASSED] preflight                      10 ms
+  [PASSED] clone                          500 ms
+  [PASSED] dbflow:sync                    3000 ms
+  [PASSED] dbflow:rollback                2500 ms
+

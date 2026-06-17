@@ -1,0 +1,21 @@
+{
+  "status": "FAILED",
+  "timestamp": "2024-01-15T12:00:00Z",
+  "repo_url": "https://example.com/repo.git",
+  "base_branch": "main",
+  "steps": [
+    {
+      "name": "preflight",
+      "status": "PASSED",
+      "duration_ms": 10
+    },
+    {
+      "name": "dbflow:sync",
+      "status": "FAILED",
+      "duration_ms": 1500,
+      "error": "BUILD FAILURE detected",
+      "trace": "Maven build output..."
+    }
+  ],
+  "total_duration_ms": 1510
+}

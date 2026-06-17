@@ -1,0 +1,13 @@
+
+=== FAILED ===
+Repo:       https://example.com/repo.git
+Branch:     main
+Duration:   1510 ms
+
+Steps:
+  [PASSED] preflight                      10 ms
+  [FAILED] dbflow:sync                    1500 ms
+         Error: BUILD FAILURE detected
+         Trace:
+           Maven build output...
+

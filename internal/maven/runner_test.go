@@ -17,25 +17,24 @@ import (
 
 func TestFormatParams(t *testing.T) {
 	tests := []struct {
-		name   string
-		pairs  []maven.KV
-		want   string
+		name  string
+		pairs []maven.KV
+		want  string
 	}{
 		{
-			name: "sync params produce comma-separated string",
+			name: "sync params produce space-separated string",
 			pairs: []maven.KV{
 				{Key: "--TAG", Value: "myrun-001"},
 				{Key: "--AUTHOR", Value: "validator-cli"},
 			},
-			want: "--TAG=myrun-001,--AUTHOR=validator-cli",
+			want: "--TAG=myrun-001 --AUTHOR=validator-cli",
 		},
 		{
-			name: "rollback params include ROLLBACK_MODE",
+			name: "rollback params include TAG only (plugin uses standard rollback by default)",
 			pairs: []maven.KV{
 				{Key: "--TAG", Value: "210"},
-				{Key: "--ROLLBACK_MODE", Value: maven.RollbackModeStandard},
 			},
-			want: "--TAG=210,--ROLLBACK_MODE=Standard",
+			want: "--TAG=210",
 		},
 		{
 			name: "ordering is stable (as provided)",
@@ -43,10 +42,10 @@ func TestFormatParams(t *testing.T) {
 				{Key: "--B", Value: "2"},
 				{Key: "--A", Value: "1"},
 			},
-			want: "--B=2,--A=1",
+			want: "--B=2 --A=1",
 		},
 		{
-			name:  "single pair has no trailing comma",
+			name:  "single pair has no trailing space",
 			pairs: []maven.KV{{Key: "--TAG", Value: "solo"}},
 			want:  "--TAG=solo",
 		},
@@ -129,7 +128,7 @@ func TestMavenRunner_Run(t *testing.T) {
 				context.Background(),
 				cloneDir,
 				maven.GoalSync,
-				[]maven.KV{{Key: "--TAG", Value: "test-001"}, {Key: "--AUTHOR", Value: "validator-cli"}},
+				[]string{"--TAG=test-001", "--AUTHOR=validator-cli"},
 				&out,
 			)
 			if err != nil && tt.wantStatus != domain.StepStatusAborted {
@@ -196,7 +195,7 @@ func TestMavenRunner_TagUnique(t *testing.T) {
 	runner := maven.NewRunner(script)
 	for range tags {
 		runner.Run(context.Background(), cloneDir, maven.GoalSync,
-			[]maven.KV{{Key: "--AUTHOR", Value: "validator-cli"}}, &bytes.Buffer{})
+			[]string{"--AUTHOR=validator-cli"}, &bytes.Buffer{})
 	}
 
 	data, err := os.ReadFile(outFile)
