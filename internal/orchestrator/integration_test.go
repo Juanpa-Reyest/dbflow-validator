@@ -44,12 +44,36 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 		t.Skipf("reference archetype not found at %s: %v", archetypeSrc, err)
 	}
 
-	// Copy the archetype to a temp dir so the flow can mutate liquibase.properties.
+	// Copy the archetype to a temp dir so the flow can mutate liquibase.properties
+	// and populate SQLInput without touching the read-only source.
 	tmpArchetype := t.TempDir()
 	t.Logf("copying archetype to %s", tmpArchetype)
 	if err := copyDir(archetypeSrc, tmpArchetype); err != nil {
 		t.Fatalf("copy archetype: %v", err)
 	}
+
+	// Populate SQLInput with a valid-named test SQL file.
+	// The plugin validates file names against: (N/U)(4 digits)_TYPE_DESCRIPTION.sql
+	// where TYPE ∈ {TA, SP, FN, PA, IX, SE, TS, PK, FK, TY, DML, GRT, USR, TBS, INS, DEL, UPD}.
+	// A TA (table) file that doesn't match the "allowed action types" causes the plugin
+	// to fall back to the full Liquibase XML changelog update — which is the correct
+	// behavior for the initial validation of a new ephemeral DB.
+	// The lb_scgolfcore schema is created by the orchestrator's schema-setup step, so
+	// the table creation is guaranteed to land in the right schema.
+	sqlInputDir := tmpArchetype + "/src/main/resources/SQLInput"
+	testSQL := `CREATE TABLE IF NOT EXISTS lb_scgolfcore.validator_run (
+  id SERIAL PRIMARY KEY,
+  run_tag TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT now()
+);`
+	testSQLRB := `DROP TABLE IF EXISTS lb_scgolfcore.validator_run;`
+	if err := os.WriteFile(sqlInputDir+"/N0001_TA_VALIDATOR_RUN.sql", []byte(testSQL), 0o644); err != nil {
+		t.Fatalf("write SQLInput test file: %v", err)
+	}
+	if err := os.WriteFile(sqlInputDir+"/N0001_TA_VALIDATOR_RUN_RB.sql", []byte(testSQLRB), 0o644); err != nil {
+		t.Fatalf("write SQLInput rollback file: %v", err)
+	}
+	t.Log("SQLInput populated with N0001_TA_VALIDATOR_RUN.sql")
 
 	// Wire real adapters.
 	pgContainerProvider := container.NewPostgresProvider()
