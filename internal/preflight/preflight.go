@@ -1,11 +1,13 @@
 // Package preflight verifies that required host binaries are on the PATH
-// before any external operation (clone, container start, Maven) is attempted.
+// and that the Docker daemon is reachable before any external operation
+// (clone, container start, Maven) is attempted.
 package preflight
 
 import (
 	"context"
 	"fmt"
 	"os/exec"
+	"time"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
 )
@@ -16,25 +18,67 @@ var execLookPath = exec.LookPath
 // requiredTools lists the binaries that must exist on the host PATH.
 var requiredTools = []string{"docker", "mvn", "git", "java"}
 
-// Preflight checks host binary availability using an injectable LookPath func.
-// Inject os/exec.LookPath in production; inject a fake in tests.
-type Preflight struct {
-	lookPath func(string) (string, error)
+// defaultDaemonProbeTimeout is the maximum time allowed for the Docker daemon ping.
+const defaultDaemonProbeTimeout = 5 * time.Second
+
+// defaultDaemonProber runs "docker version --format {{.Server.Version}}" with a
+// short timeout to confirm the daemon is reachable.  It is the production prober.
+func defaultDaemonProber(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, defaultDaemonProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("Docker is installed but the daemon is not running — start Docker and retry: %w", err)
+	}
+	return nil
 }
 
-// New returns a Preflight that uses the provided LookPath func.
-// Pass nil to use exec.LookPath from the standard library.
+// Preflight checks host binary availability and Docker daemon liveness
+// using injectable functions so the logic can be unit-tested without
+// a real daemon or real binaries.
+type Preflight struct {
+	lookPath     func(string) (string, error)
+	daemonProber func(context.Context) error
+}
+
+// New returns a Preflight that uses the standard exec.LookPath and a real
+// "docker version" daemon probe with a 5-second timeout.
+// Pass nil to use the default for either parameter.
 func New(lookPath func(string) (string, error)) *Preflight {
+	return NewWithDaemonProber(lookPath, nil)
+}
+
+// NewWithDaemonProber returns a Preflight with explicit injectable lookPath
+// and daemonProber functions.  Pass nil for either to use the production default.
+//
+//   - lookPath — called once per required binary to confirm it is on the PATH.
+//   - daemonProber — called after the Docker binary is found to confirm the daemon
+//     is actually running.  Returning a non-nil error fails preflight with the
+//     error message intact (so callers see a distinct "daemon not running" message
+//     rather than a generic "not found" message).
+func NewWithDaemonProber(
+	lookPath func(string) (string, error),
+	daemonProber func(context.Context) error,
+) *Preflight {
 	if lookPath == nil {
 		lookPath = execLookPath
 	}
-	return &Preflight{lookPath: lookPath}
+	if daemonProber == nil {
+		daemonProber = defaultDaemonProber
+	}
+	return &Preflight{
+		lookPath:     lookPath,
+		daemonProber: daemonProber,
+	}
 }
 
-// Check verifies all required host tools are present.
-// Returns (statuses, nil) when all are found, or (nil, error) for the first
-// missing tool with a distinct, actionable error message.
-func (p *Preflight) Check(_ context.Context) ([]domain.ToolStatus, error) {
+// Check verifies all required host tools are present and that the Docker
+// daemon is reachable.  Returns (statuses, nil) when all checks pass, or
+// (nil, error) on the first failure with a distinct, actionable message:
+//
+//   - Binary missing:  "... <name> not found on PATH — install it and re-run"
+//   - Daemon down:     "Docker is installed but the daemon is not running — start Docker and retry"
+func (p *Preflight) Check(ctx context.Context) ([]domain.ToolStatus, error) {
 	statuses := make([]domain.ToolStatus, 0, len(requiredTools))
 
 	for _, name := range requiredTools {
@@ -48,6 +92,13 @@ func (p *Preflight) Check(_ context.Context) ([]domain.ToolStatus, error) {
 			Found: true,
 			Path:  path,
 		})
+
+		// After finding the docker binary, confirm the daemon is actually running.
+		if name == "docker" {
+			if err := p.daemonProber(ctx); err != nil {
+				return nil, fmt.Errorf("%w: %v", domain.ErrPreflight, err)
+			}
+		}
 	}
 
 	return statuses, nil
