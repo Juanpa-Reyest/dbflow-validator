@@ -1,105 +1,82 @@
 # dbflow-validator
 
-`dbflow-validator` is a self-contained CLI that validates a PostgreSQL Maven DB archetype by cloning the repository, spinning up an ephemeral Postgres container, running `mvn dbflow:sync` and `mvn dbflow:rollback` inside a Maven container on a shared Docker network, and reporting `PASSED` or `FAILED` with a full per-step trace. The binary ships with a vendored Maven repository embedded inside it — **no Maven installation or JVM is required on the host machine**.
+Validate your database changes **on your own machine**, before opening a PR.
+
+You point it at your archetype repository; it clones it, spins up a throwaway
+PostgreSQL, runs `sync` and `rollback`, and tells you **PASSED** or **FAILED**
+with a full trace. No changes are pushed anywhere. When it finishes, everything
+it created is cleaned up automatically.
 
 ---
 
-## Prerequisites
+## What you need (only two things)
 
-| Dependency | Required | Notes |
-|------------|----------|-------|
-| **Docker** | Yes | Daemon must be running (`docker info` must succeed) |
-| **Git** | Yes | Must be on `PATH` |
-| Maven / JVM | **No** | Runs inside the `maven:3.9-eclipse-temurin-21` container automatically |
+| You need | Why |
+|----------|-----|
+| **Docker**, running | The tool creates throwaway containers for the database and the build |
+| **Git** | To clone your archetype repository |
 
----
+You do **not** need Maven or Java installed — they run inside a container, automatically.
 
-## Install
-
-### From source (Go 1.25+)
-
-```bash
-make build          # build for the current platform → dist/dbflow-validator
-./install.sh        # copy to /usr/local/bin (or ~/.local/bin when not writable)
-```
-
-### Cross-compile all platforms
-
-```bash
-make build-all      # produces dist/dbflow-validator-{linux,darwin,windows}-{amd64,arm64}
-```
-
-The compiled binary is ~118 MB because the vendored Maven repository is embedded inside it. No loose asset files are needed alongside the binary.
-
-### Windows
-
-Copy `dist/dbflow-validator-windows-amd64.exe` to a directory that is on your `PATH`. See `install.sh` for the note about Windows.
+> Don't have Docker? Install **Docker Desktop** (Windows/macOS) or **Docker Engine** (Linux),
+> start it, and make sure `docker` works in a terminal before continuing.
 
 ---
 
-## Usage
+## Quickstart for developers
 
-### Interactive (TTY)
+It's **one file**. Download the one for your system, run it, answer the prompt. That's it.
 
-When `--repo-url` and `DBFLOW_GIT_TOKEN` are not provided and stdin is a terminal, the tool prompts for them:
+### 🪟 Windows
+
+1. Download **`dbflow-validator-windows-amd64.exe`**.
+2. Open a terminal (PowerShell) where you saved it and run it:
+   ```powershell
+   .\dbflow-validator-windows-amd64.exe
+   ```
+   (If Windows shows "Windows protected your PC" → **More info → Run anyway**. It's unsigned, not unsafe.)
+3. It asks for your repository URL and access token. Done.
+
+### 🍎 macOS
+
+1. Download **`dbflow-validator-darwin-arm64`** (Apple Silicon / M1+) or **`dbflow-validator-darwin-amd64`** (Intel).
+2. In a terminal, allow and run it:
+   ```bash
+   chmod +x dbflow-validator-darwin-arm64
+   xattr -d com.apple.quarantine dbflow-validator-darwin-arm64   # macOS blocks unsigned downloads; this unblocks it
+   ./dbflow-validator-darwin-arm64
+   ```
+3. It asks for your repository URL and access token. Done.
+
+### 🐧 Linux
+
+1. Download **`dbflow-validator-linux-amd64`**.
+2. In a terminal:
+   ```bash
+   chmod +x dbflow-validator-linux-amd64
+   ./dbflow-validator-linux-amd64
+   ```
+3. It asks for your repository URL and access token. Done.
+
+> **Tip:** rename the file to `dbflow-validator` and move it somewhere on your `PATH`
+> so you can just type `dbflow-validator` from anywhere. Optional — it works fine without that.
+
+---
+
+## What it asks you
+
+When you run it with no options, it prompts for the only two things it needs:
 
 ```
-$ dbflow-validator
-Repository URL: https://github.com/org/db-artifacts-myproject.git
+Repository URL:        https://github.com/your-org/your-archetype.git
 Git access token (hidden):
 ```
 
-The token is read with echo suppressed and is never written to disk, logs, or process arguments.
-
-### With flags
-
-```bash
-DBFLOW_GIT_TOKEN=<token> dbflow-validator \
-  --repo-url   https://github.com/org/db-artifacts-myproject.git \
-  --base-branch integracion \
-  --output-format console
-```
-
-### With JSON output
-
-```bash
-DBFLOW_GIT_TOKEN=<token> dbflow-validator \
-  --repo-url    https://github.com/org/db-artifacts-myproject.git \
-  --output-format json \
-  --output-file  result.json
-```
+The token is typed hidden and is **never** written to disk, logs, or anywhere — it's only used to clone.
 
 ---
 
-## Flag Reference
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--repo-url` | — | Git repository URL to clone and validate (prompted interactively when absent and TTY) |
-| `--base-branch` | `integracion` | Branch to validate |
-| `--output-format` | `console` | Output format: `console` or `json` |
-| `--output-file` | — | Write JSON output to this path (optional) |
-| `--log-level` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
-
----
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `DBFLOW_GIT_TOKEN` | Git access token (alternative to interactive prompt; never logged) |
-
----
-
-## Configuration
-
-No configuration file is required. All inputs are flags or environment variables. The embedded Maven repo is extracted to `~/.cache/dbflow-validator/<version>/m2` on the first run; subsequent runs reuse the cached extraction without re-extracting.
-
----
-
-## Output
-
-### Console (default)
+## What you'll see
 
 ```
 [PASSED] preflight        (12 ms)
@@ -113,72 +90,106 @@ No configuration file is required. All inputs are flags or environment variables
 Overall: PASSED
 ```
 
-### JSON
-
-```json
-{
-  "status": "PASSED",
-  "steps": [
-    { "name": "preflight",       "status": "PASSED", "durationMs": 12 },
-    { "name": "clone",           "status": "PASSED", "durationMs": 3421 },
-    { "name": "dbflow:sync",     "status": "PASSED", "durationMs": 26311 },
-    { "name": "dbflow:rollback", "status": "PASSED", "durationMs": 13266 }
-  ]
-}
-```
+- **PASSED** → your changes apply and roll back cleanly. Good to open your PR.
+- **FAILED** → the full Maven trace is printed so you can see exactly what broke.
 
 ---
 
-## Exit Codes
+## Other ways to run it (optional)
+
+You don't have to use the prompt. You can pass everything as options:
+
+```bash
+# Provide the token via environment variable + the repo via a flag
+DBFLOW_GIT_TOKEN=<your-token> dbflow-validator \
+  --repo-url https://github.com/your-org/your-archetype.git \
+  --base-branch integracion
+
+# Get machine-readable JSON instead of the console view
+DBFLOW_GIT_TOKEN=<your-token> dbflow-validator \
+  --repo-url https://github.com/your-org/your-archetype.git \
+  --output-format json \
+  --output-file result.json
+```
+
+Run `dbflow-validator --help` for the full list any time.
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--repo-url` | — | Repository to clone and validate (asked interactively if omitted) |
+| `--base-branch` | `integracion` | Branch to validate |
+| `--output-format` | `console` | `console` or `json` |
+| `--output-file` | — | Write the JSON result to this path |
+| `--log-level` | `info` | `debug`, `info`, `warn`, `error` |
+| `--version`, `-v` | — | Print the version and exit |
+| `--help`, `-h` | — | Print help and exit |
+
+| Environment variable | Description |
+|----------------------|-------------|
+| `DBFLOW_GIT_TOKEN` | Git access token (instead of the interactive prompt; never logged) |
+
+### Exit codes
 
 | Code | Meaning |
 |------|---------|
-| `0` | Validation PASSED |
-| `1` | Validation FAILED |
-| `2` | Configuration or usage error |
-| `130` | Aborted by SIGINT/SIGTERM |
+| `0` | Validation **PASSED** |
+| `1` | Validation **FAILED** |
+| `2` | Wrong usage / missing input |
+| `130` | Cancelled with Ctrl-C |
 
 ---
 
 ## Troubleshooting
 
-### Docker daemon is not running
+**"Docker is installed but the daemon is not running"**
+Start Docker (open Docker Desktop on Windows/macOS, or `sudo systemctl start docker` on Linux) and run again.
 
+**macOS: "cannot be opened because Apple cannot check it for malicious software"**
+The binary is unsigned. Run `xattr -d com.apple.quarantine ./dbflow-validator-darwin-arm64` once (as shown in the macOS steps), or right-click the file → **Open** → **Open**.
+
+**Windows: "Windows protected your PC"**
+Click **More info → Run anyway**. The binary is unsigned, not malicious.
+
+**"failed to pull image maven:3.9-eclipse-temurin-21"**
+Your Docker can't reach the internet to download the build image the first time. Check your connection, or pre-pull it: `docker pull maven:3.9-eclipse-temurin-21`.
+
+**FAILED with a Maven trace**
+That's the tool doing its job — your changes have a problem. Look for `[ERROR]` lines in the printed trace. Common causes: a malformed changeset, or a missing tag in `master-changelog.xml`.
+
+**First run is slow**
+The first run downloads the build image and extracts the embedded Maven repository to `~/.cache/dbflow-validator/`. Later runs reuse the cache and are much faster.
+
+---
+
+## For maintainers (building & distributing)
+
+> Developers don't need this section — it's for whoever builds and ships the binaries.
+
+Requires **Go 1.25+**. The binary is ~118 MB because the vendored Maven repository
+(the `dbflow` plugin + PostgreSQL driver) is embedded inside it, so the distributed
+file is fully self-contained.
+
+```bash
+make build        # build for THIS machine            → dist/dbflow-validator
+make build-all    # cross-compile all four platforms  → dist/dbflow-validator-<os>-<arch>
 ```
-dbflow-validator: preflight check failed: Docker is installed but the daemon is not running — start Docker and retry
-```
 
-Start the Docker daemon (`sudo systemctl start docker` on Linux, open Docker Desktop on macOS/Windows) and re-run.
+`make build-all` produces:
 
-### Maven image pull fails
+- `dist/dbflow-validator-linux-amd64`
+- `dist/dbflow-validator-darwin-amd64` (macOS Intel)
+- `dist/dbflow-validator-darwin-arm64` (macOS Apple Silicon)
+- `dist/dbflow-validator-windows-amd64.exe`
 
-```
-start maven container: failed to pull image "maven:3.9-eclipse-temurin-21": ...
-```
+**To distribute:** share those binaries with developers (a GitHub Release is the
+ideal home — one download link per OS). Each file is the complete tool; nothing
+else ships alongside it.
 
-Check your internet connection or ensure the Docker daemon can reach the Docker Hub registry. Alternatively, pull the image manually: `docker pull maven:3.9-eclipse-temurin-21`.
+`install.sh` is a convenience for **macOS/Linux maintainers** to copy the right
+binary onto their own `PATH` — it is not the developer install path (it's bash-only
+and doesn't cover Windows).
 
-### BUILD FAILURE in Maven output
-
-The tool prints the full Maven stdout/stderr trace when a step fails. Look for `[ERROR]` lines in the trace — common causes:
-
-- Missing or malformed changesets in `src/main/resources/db/`.
-- A missing tag in `master-changelog.xml` (rollback requires a tag to exist).
-- Network connectivity issue between the Maven container and the Postgres container (rare; usually a Docker network problem).
-
-### Maven artifact resolution fails (offline)
-
-If you see `Could not find artifact ...` errors in the trace, the embedded vendored repository may be incomplete. The embedded repo currently covers:
-
-- `com.gs.ftt.coe-ds:relational-db-release-manager-plugin:0.0.1`
-- `org.postgresql:postgresql:42.7.4`
-
-If the plugin version changes, rebuild the binary from source after updating `internal/embedrepo/mvn-vendor/repository`.
-
-### Maven/JVM not found — this is expected
-
-`dbflow-validator` does **not** require `mvn` or `java` on the host. Maven and the JVM run inside the `maven:3.9-eclipse-temurin-21` Docker container. Preflight checks only `docker` and `git`.
-
-### Cached extraction
-
-The first run extracts the embedded Maven repo to `~/.cache/dbflow-validator/<version>/m2`. If you suspect a corrupt extraction, delete that directory and re-run — extraction will happen automatically.
+**Updating the embedded plugin:** if the `dbflow` plugin version changes, replace
+the jars under `internal/embedrepo/mvn-vendor/repository/` and rebuild.
