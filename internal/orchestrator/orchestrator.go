@@ -145,7 +145,18 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}
 	pass("readiness-probe", time.Since(t0))
 
-	// --- Step 6: Patch liquibase.properties ---
+	// --- Step 6a: Inject PostgreSQL driver into cloned pom.xml ---
+	// The relational-db-release-manager-plugin is a shaded jar that bundles
+	// Oracle/MySQL/Snowflake drivers but NOT PostgreSQL. The plugin classloader
+	// is isolated; the driver must be declared inside <plugin><dependencies>.
+	t0 = time.Now()
+	clonedPomPath := cloneRoot + "/pom.xml"
+	if err := maven.InjectDriverDependency(clonedPomPath); err != nil {
+		return fail("pom-driver-inject", "failed to inject PostgreSQL driver into cloned pom.xml", err)
+	}
+	pass("pom-driver-inject", time.Since(t0))
+
+	// --- Step 6b: Patch liquibase.properties ---
 	t0 = time.Now()
 	if err := deps.Patcher.Patch(propsPath, coords); err != nil {
 		return fail("properties-patch", "failed to patch liquibase.properties", err)

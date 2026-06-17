@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,6 +14,25 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
 	"github.com/dbflow-validator/dbflow-validator/internal/orchestrator"
 )
+
+// minimalPOM is a pom.xml that contains the dbflow plugin (target of driver injection).
+// This allows the orchestrator's pom-driver-inject step to succeed on the fake clone dir.
+const minimalPOM = `<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>test</groupId>
+  <artifactId>test</artifactId>
+  <version>0.0.1</version>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>com.gs.ftt.coe-ds</groupId>
+        <artifactId>relational-db-release-manager-plugin</artifactId>
+        <version>0.0.1</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>`
 
 // ---- Fake port implementations ----
 
@@ -112,6 +133,11 @@ var fastPolicy = container.RetryPolicy{
 func happyDeps(t *testing.T) orchestrator.Deps {
 	t.Helper()
 	cloneDir := t.TempDir()
+	// The orchestrator injects the PostgreSQL driver into cloneDir/pom.xml;
+	// write a minimal pom that contains the target plugin so the step succeeds.
+	if err := os.WriteFile(filepath.Join(cloneDir, "pom.xml"), []byte(minimalPOM), 0o644); err != nil {
+		t.Fatalf("write fake pom.xml: %v", err)
+	}
 	return orchestrator.Deps{
 		Preflight: &fakePreflight{},
 		Cloner:    &fakeCloner{root: cloneDir},
