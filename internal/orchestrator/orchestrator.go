@@ -13,6 +13,7 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
 	"github.com/dbflow-validator/dbflow-validator/internal/liquibase"
 	"github.com/dbflow-validator/dbflow-validator/internal/maven"
+	internalvendor "github.com/dbflow-validator/dbflow-validator/internal/vendor"
 )
 
 // Deps holds all port implementations wired at application startup.
@@ -29,6 +30,11 @@ type Deps struct {
 	// Docker network is torn down LAST (after both containers are stopped).
 	// Leave nil when no Docker network is in use (e.g. unit tests).
 	NetworkCleanup func() error
+	// MavenRepoCachePath is the host path to the vendored Maven repository (mvn-vendor/repository).
+	// When non-empty, the orchestrator writes settings.xml into the clone dir so the
+	// ContainerRunner can pick it up at /work/settings.xml inside the Maven container.
+	// Leave empty to use the host's default Maven settings (not recommended for production).
+	MavenRepoCachePath string
 	// ReadinessPolicy overrides the default retry policy for the readiness probe.
 	// Leave nil to use container.DefaultRetryPolicy.
 	ReadinessPolicy *container.RetryPolicy
@@ -118,6 +124,17 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		return os.RemoveAll(cloneRoot)
 	})
 	pass("clone", time.Since(t0))
+
+	// Write settings.xml into the clone dir so the Maven container can pick it up
+	// at /work/settings.xml. This is required when MavenRepoCachePath is set and
+	// a ContainerRunner is in use. When MavenRepoCachePath is empty, settings.xml
+	// is not written (host Maven or pre-configured runner used instead).
+	if deps.MavenRepoCachePath != "" {
+		if _, err := internalvendor.WriteSettingsXML(cloneRoot, deps.MavenRepoCachePath); err != nil {
+			slog.Warn("could not write settings.xml into clone dir; Maven may fail to resolve offline artifacts",
+				"err", err)
+		}
+	}
 
 	// --- Step 3: Engine guard ---
 	t0 = time.Now()

@@ -100,31 +100,39 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	// (avoids needing a real git remote for the e2e test).
 	fakeCloner := &localCloner{root: tmpArchetype}
 
-	// Resolve vendored Maven settings.xml from project root.
+	// Resolve vendored Maven repo from project root.
 	// The test binary runs from internal/orchestrator/ which is 2 levels deep
 	// inside the project root (dbflow-validator/). Go up 2 levels, not 3.
 	projectRoot := filepath.Join("..", "..")
 	projectRootAbs, _ := filepath.Abs(projectRoot)
-	mavenSettingsPath := ""
+	mavenRepoCachePath := ""
 	if repoPath, err := internalvendor.FindVendorRepository(projectRootAbs); err == nil {
-		settingsDir := t.TempDir()
-		if sp, err := internalvendor.WriteSettingsXML(settingsDir, repoPath); err == nil {
-			mavenSettingsPath = sp
-			t.Logf("using vendored Maven settings: %s", mavenSettingsPath)
-		}
+		mavenRepoCachePath = repoPath
+		t.Logf("using vendored Maven repo: %s", mavenRepoCachePath)
 	} else {
-		t.Logf("mvn-vendor/repository not found (%v); Maven will use ~/.m2", err)
+		t.Logf("mvn-vendor/repository not found (%v); Maven container will have no /m2 mount", err)
 	}
 
+	// Maven runs inside a container on the shared Docker network.
+	// Host Maven/JVM are NOT used — this validates the zero-friction distribution path.
+	containerRunner := maven.NewContainerRunner(
+		maven.DefaultImage,
+		networkName,
+		mavenRepoCachePath,
+		os.Getuid(),
+		os.Getgid(),
+	)
+
 	deps := orchestrator.Deps{
-		Preflight:      preflight.New(nil),
-		Cloner:         fakeCloner,
-		DBProvider:     realDBProvider,
-		Patcher:        liquibase.NewPatcher(),
-		Engine:         engine.NewDetector(),
-		Tags:           &liquibase.ChangelogResolver{},
-		Maven:          maven.NewRunner("", mavenSettingsPath),
-		NetworkCleanup: networkCleanup,
+		Preflight:          preflight.New(nil),
+		Cloner:             fakeCloner,
+		DBProvider:         realDBProvider,
+		Patcher:            liquibase.NewPatcher(),
+		Engine:             engine.NewDetector(),
+		Tags:               &liquibase.ChangelogResolver{},
+		Maven:              containerRunner,
+		NetworkCleanup:     networkCleanup,
+		MavenRepoCachePath: mavenRepoCachePath,
 	}
 
 	cfg := config.Config{

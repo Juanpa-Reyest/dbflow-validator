@@ -13,6 +13,40 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/maven"
 )
 
+// --- ContainerRunner unit tests ---
+
+// TestContainerRunner_DefaultImage verifies the exported DefaultImage constant.
+func TestContainerRunner_DefaultImage(t *testing.T) {
+	if maven.DefaultImage == "" {
+		t.Error("DefaultImage must not be empty")
+	}
+	if !strings.Contains(maven.DefaultImage, "maven") {
+		t.Errorf("DefaultImage = %q, expected to contain 'maven'", maven.DefaultImage)
+	}
+}
+
+// TestNewContainerRunner_Fields verifies that NewContainerRunner accepts and stores
+// its constructor arguments without panicking.
+func TestNewContainerRunner_Fields(t *testing.T) {
+	runner := maven.NewContainerRunner(
+		maven.DefaultImage,
+		"dbflow-net-abc123",
+		"/tmp/m2-cache",
+		1000,
+		1000,
+	)
+	if runner == nil {
+		t.Fatal("NewContainerRunner returned nil")
+	}
+}
+
+// TestContainerRunner_ImplementsMavenRunner ensures ContainerRunner satisfies the domain interface.
+func TestContainerRunner_ImplementsMavenRunner(t *testing.T) {
+	var _ domain.MavenRunner = maven.NewContainerRunner(
+		maven.DefaultImage, "net", "/cache", 0, 0,
+	)
+}
+
 // --- Maven constant verification ---
 
 // TestMavenConstants verifies the reverse-engineered goal names and param format

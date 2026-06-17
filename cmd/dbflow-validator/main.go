@@ -87,9 +87,10 @@ func run(args []string, env func(string) string) int {
 	}
 
 	// Resolve vendored Maven repo (relative to binary location or cwd).
-	// Falls back to empty string (system Maven repo) on failure.
-	mavenSettingsPath := resolveMavenSettings()
+	// For the container runner, this path is mounted at /m2 inside the Maven container.
+	mavenRepoCachePath := resolveMavenRepoCachePath()
 
+	uid, gid := hostUIDGID()
 	deps := orchestrator.Deps{
 		Preflight: preflight.New(nil),
 		Cloner:    git.NewCloner(nil, nil),
@@ -97,11 +98,12 @@ func run(args []string, env func(string) string) int {
 			eng:      dbEng,
 			provider: pgProvider,
 		},
-		Patcher:        liquibase.NewPatcher(),
-		Engine:         engine.NewDetector(),
-		Tags:           &liquibase.ChangelogResolver{},
-		Maven:          maven.NewRunner("", mavenSettingsPath),
-		NetworkCleanup: networkCleanup,
+		Patcher:            liquibase.NewPatcher(),
+		Engine:             engine.NewDetector(),
+		Tags:               &liquibase.ChangelogResolver{},
+		Maven:              maven.NewContainerRunner(maven.DefaultImage, networkName, mavenRepoCachePath, uid, gid),
+		NetworkCleanup:     networkCleanup,
+		MavenRepoCachePath: mavenRepoCachePath,
 	}
 
 	// --- 4. Run orchestration ---
@@ -166,45 +168,34 @@ func (p *postgresDBProvider) Ping(ctx context.Context, dsn string) error {
 	return container.Ping(ctx, dsn)
 }
 
-// resolveMavenSettings locates the embedded mvn-vendor/repository relative to the
-// binary's parent directory (dev: project root, prod: binary install dir) and
-// writes a settings.xml into a temp directory that Maven will use for this run.
-// Returns the settings.xml path, or "" if the vendored repo is not found
-// (Maven will fall back to ~/.m2 in that case).
-func resolveMavenSettings() string {
+// resolveMavenRepoCachePath locates the on-disk mvn-vendor/repository relative
+// to the binary's parent directory (dev: project root, prod: binary install dir).
+// Returns the absolute path to the repository directory, or "" if not found.
+// The path is passed to maven.ContainerRunner so it can be mounted at /m2 (ro)
+// inside the Maven container for offline artifact resolution.
+func resolveMavenRepoCachePath() string {
 	// Try binary location first (works for built binaries).
 	exe, err := os.Executable()
 	if err == nil {
 		projectRoot := filepath.Dir(exe)
-		if path := tryWriteSettings(projectRoot); path != "" {
-			return path
+		if repoPath, err := internalvendor.FindVendorRepository(projectRoot); err == nil {
+			return repoPath
 		}
 	}
 	// Fall back to the current working directory (works during `go run` and tests).
 	cwd, err := os.Getwd()
 	if err == nil {
-		if path := tryWriteSettings(cwd); path != "" {
-			return path
+		if repoPath, err := internalvendor.FindVendorRepository(cwd); err == nil {
+			return repoPath
 		}
 	}
-	slog.Warn("mvn-vendor/repository not found; Maven will use the host ~/.m2 repo")
+	slog.Warn("mvn-vendor/repository not found; Maven container may fail offline resolution")
 	return ""
 }
 
-func tryWriteSettings(projectRoot string) string {
-	repoPath, err := internalvendor.FindVendorRepository(projectRoot)
-	if err != nil {
-		return ""
-	}
-	dir, err := os.MkdirTemp("", "dbflow-mvn-settings-*")
-	if err != nil {
-		slog.Warn("cannot create temp dir for settings.xml", "err", err)
-		return ""
-	}
-	settingsPath, err := internalvendor.WriteSettingsXML(dir, repoPath)
-	if err != nil {
-		slog.Warn("cannot write settings.xml", "err", err)
-		return ""
-	}
-	return settingsPath
+// hostUIDGID returns the host process's UID and GID for --user in the Maven container.
+// This ensures files written into /work (the mounted clone dir) are owned by the
+// host user, not root, so os.RemoveAll in cleanup succeeds without permission errors.
+func hostUIDGID() (int, int) {
+	return os.Getuid(), os.Getgid()
 }
