@@ -26,10 +26,6 @@ const (
 	GoalRollback = "dbflow:rollback"
 )
 
-// RollbackModeStandard is the TYPE_ROLLBACK value for a standard tag-based rollback.
-// NOTE: the plugin uses TYPE_ROLLBACK internally; keep this for reference even if unused.
-const RollbackModeStandard = "Standard"
-
 // KV is a key-value pair used to build the -Dparams argument.
 type KV struct {
 	Key   string

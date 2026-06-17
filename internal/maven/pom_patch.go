@@ -11,18 +11,27 @@ const (
 	pluginGroupID    = "com.gs.ftt.coe-ds"
 	pluginArtifactID = "relational-db-release-manager-plugin"
 
-	// driverGroupID / driverArtifactID / driverVersion are the coordinates of the
-	// PostgreSQL JDBC driver that must be injected into the plugin's classloader.
+	// driverGroupID / driverArtifactID are the Maven coordinates of the PostgreSQL
+	// JDBC driver that must be injected into the plugin's classloader.
 	driverGroupID    = "org.postgresql"
 	driverArtifactID = "postgresql"
-	driverVersion    = "42.7.4"
+
+	// PostgresDriverVersion is the single source of truth for the PostgreSQL JDBC
+	// driver version used by this tool.  It is referenced both in the pom injection
+	// XML and in the vendored repository path so a version bump updates both.
+	// The vendor package's TestVendoredDriverJarExists test asserts that the
+	// vendored JAR at mvn-vendor/repository/.../postgresql-<version>.jar exists for
+	// this exact version, preventing silent desync.
+	PostgresDriverVersion = "42.7.4"
 )
 
 // driverDependencyXML is the XML snippet injected inside <plugin><dependencies>.
-const driverDependencyXML = `          <dependency>
+// It references PostgresDriverVersion so the pom injection and the vendored JAR
+// path are always in sync — there is only one place to change when upgrading.
+var driverDependencyXML = `          <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <version>42.7.4</version>
+            <version>` + PostgresDriverVersion + `</version>
           </dependency>`
 
 // InjectDriverDependency reads the pom.xml at pomPath, finds the
