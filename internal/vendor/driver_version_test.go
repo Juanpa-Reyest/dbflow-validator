@@ -18,25 +18,26 @@ import (
 // test will fail immediately, preventing a silent desync between the injected
 // pom version and the vendored artifact.
 func TestVendoredDriverJarExists(t *testing.T) {
-	// Locate the project root relative to this test file.
+	// Locate the embedded repo root relative to this test file.
 	// The test file lives at internal/vendor/driver_version_test.go,
-	// so the project root is two directories up.
+	// so the embedded repo is at internal/embedrepo/mvn-vendor/repository,
+	// which is one directory up and then into embedrepo/.
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
 	}
 	// thisFile: .../internal/vendor/driver_version_test.go
-	// projectRoot: .../
-	projectRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	// embedrepoDir: .../internal/embedrepo/
+	embedrepoDir := filepath.Join(filepath.Dir(thisFile), "..", "embedrepo")
 
 	version := maven.PostgresDriverVersion
 	if version == "" {
 		t.Fatal("maven.PostgresDriverVersion is empty")
 	}
 
-	// Expected path: <projectRoot>/mvn-vendor/repository/org/postgresql/postgresql/<version>/postgresql-<version>.jar
+	// Expected path: <embedrepoDir>/mvn-vendor/repository/org/postgresql/postgresql/<version>/postgresql-<version>.jar
 	jarPath := filepath.Join(
-		projectRoot,
+		embedrepoDir,
 		"mvn-vendor", "repository",
 		"org", "postgresql", "postgresql",
 		version,

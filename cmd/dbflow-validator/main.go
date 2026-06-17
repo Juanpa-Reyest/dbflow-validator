@@ -16,11 +16,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/config"
 	"github.com/dbflow-validator/dbflow-validator/internal/container"
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
+	"github.com/dbflow-validator/dbflow-validator/internal/embedrepo"
 	"github.com/dbflow-validator/dbflow-validator/internal/engine"
 	"github.com/dbflow-validator/dbflow-validator/internal/git"
 	"github.com/dbflow-validator/dbflow-validator/internal/liquibase"
@@ -28,8 +30,12 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/orchestrator"
 	"github.com/dbflow-validator/dbflow-validator/internal/preflight"
 	"github.com/dbflow-validator/dbflow-validator/internal/report"
-	internalvendor "github.com/dbflow-validator/dbflow-validator/internal/vendor"
 )
+
+// buildVersion is injected at link time via -ldflags "-X main.buildVersion=<version>".
+// It is used as the per-version cache directory key for the extracted Maven repo.
+// Falls back to "dev" when not set (go run / go test without ldflags).
+var buildVersion = "dev"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Getenv))
@@ -86,9 +92,9 @@ func run(args []string, env func(string) string) int {
 		return 2
 	}
 
-	// Resolve vendored Maven repo (relative to binary location or cwd).
+	// Extract embedded vendored Maven repo to the per-version cache dir.
 	// For the container runner, this path is mounted at /m2 inside the Maven container.
-	mavenRepoCachePath := resolveMavenRepoCachePath()
+	mavenRepoCachePath := resolveEmbeddedMavenCache()
 
 	uid, gid := hostUIDGID()
 	deps := orchestrator.Deps{
@@ -168,29 +174,40 @@ func (p *postgresDBProvider) Ping(ctx context.Context, dsn string) error {
 	return container.Ping(ctx, dsn)
 }
 
-// resolveMavenRepoCachePath locates the on-disk mvn-vendor/repository relative
-// to the binary's parent directory (dev: project root, prod: binary install dir).
-// Returns the absolute path to the repository directory, or "" if not found.
-// The path is passed to maven.ContainerRunner so it can be mounted at /m2 (ro)
-// inside the Maven container for offline artifact resolution.
-func resolveMavenRepoCachePath() string {
-	// Try binary location first (works for built binaries).
-	exe, err := os.Executable()
-	if err == nil {
-		projectRoot := filepath.Dir(exe)
-		if repoPath, err := internalvendor.FindVendorRepository(projectRoot); err == nil {
-			return repoPath
+// resolveEmbeddedMavenCache extracts the embedded vendored Maven repository to
+// the per-version user cache directory and returns the extraction path.
+//
+// Cache location: ~/.cache/dbflow-validator/<buildVersion>/m2
+//
+// On failure, a warning is logged and "" is returned. The Maven container will
+// run without the /m2 mount and will produce a clear error about missing artifacts
+// rather than a silent failure.
+func resolveEmbeddedMavenCache() string {
+	cacheRoot := defaultCacheRoot()
+	repoPath, err := embedrepo.EnsureExtracted(cacheRoot, buildVersion)
+	if err != nil {
+		slog.Warn("failed to extract embedded Maven repo; Maven container may fail offline resolution",
+			"err", err, "cacheRoot", cacheRoot, "version", buildVersion)
+		return ""
+	}
+	return repoPath
+}
+
+// defaultCacheRoot returns the OS-appropriate user cache root for dbflow-validator.
+// On Linux/macOS: ~/.cache/dbflow-validator
+// On Windows:     %LOCALAPPDATA%\dbflow-validator
+func defaultCacheRoot() string {
+	if runtime.GOOS == "windows" {
+		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+			return filepath.Join(localAppData, "dbflow-validator")
 		}
 	}
-	// Fall back to the current working directory (works during `go run` and tests).
-	cwd, err := os.Getwd()
-	if err == nil {
-		if repoPath, err := internalvendor.FindVendorRepository(cwd); err == nil {
-			return repoPath
-		}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Fallback: use temp dir (unusual but safe).
+		return filepath.Join(os.TempDir(), "dbflow-validator")
 	}
-	slog.Warn("mvn-vendor/repository not found; Maven container may fail offline resolution")
-	return ""
+	return filepath.Join(home, ".cache", "dbflow-validator")
 }
 
 // hostUIDGID returns the host process's UID and GID for --user in the Maven container.
