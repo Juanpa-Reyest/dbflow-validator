@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // register "pgx" driver for database/sql
@@ -31,6 +32,20 @@ func NewPostgresProvider() *PostgresProvider {
 	return &PostgresProvider{}
 }
 
+// initSQL is executed by Postgres on first startup via docker-entrypoint-initdb.d/.
+// It creates roles that archetype DCL changesets may reference.
+// Uses a DO block to avoid errors if the role already exists.
+const initSQL = `
+-- Roles expected by archetype DCL changesets.
+DO $$
+BEGIN
+  CREATE ROLE appbackend;
+EXCEPTION WHEN duplicate_object THEN
+  NULL;
+END
+$$;
+`
+
 // Start launches an ephemeral postgres:17.4 container on a random free host port
 // and waits until Postgres logs that it is ready to accept connections.
 func (p *PostgresProvider) Start(ctx context.Context) (domain.ContainerCoords, error) {
@@ -41,6 +56,14 @@ func (p *PostgresProvider) Start(ctx context.Context) (domain.ContainerCoords, e
 			"POSTGRES_DB":       throwawayDB,
 			"POSTGRES_USER":     throwawayUser,
 			"POSTGRES_PASSWORD": throwawayPass,
+		},
+		// Inject init SQL — Postgres runs all files in /docker-entrypoint-initdb.d/ on first start.
+		Files: []testcontainers.ContainerFile{
+			{
+				Reader:            strings.NewReader(initSQL),
+				ContainerFilePath: "/docker-entrypoint-initdb.d/00-init-roles.sql",
+				FileMode:          0o644,
+			},
 		},
 		// Wait until the ready message appears twice (primary + health).
 		WaitingFor: wait.ForLog("database system is ready to accept connections").

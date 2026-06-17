@@ -32,8 +32,8 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	}
 
 	// The reference archetype is relative to the workspace directory.
-	// Use an absolute path based on the test file location.
-	archetypeSrc := filepath.Join("..", "..", "..", "..", "..", "..", "..", "..", "db-artifacts-scgolfcore")
+	// Path from internal/orchestrator: ../../../db-artifacts-scgolfcore
+	archetypeSrc := filepath.Join("..", "..", "..", "db-artifacts-scgolfcore")
 	archetypeSrc, err := filepath.Abs(archetypeSrc)
 	if err != nil {
 		t.Fatalf("resolve archetype path: %v", err)
