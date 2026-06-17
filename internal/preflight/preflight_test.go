@@ -19,11 +19,10 @@ func makeFakeLookPath(found map[string]string) func(string) (string, error) {
 }
 
 func TestPreflight_Check(t *testing.T) {
-	allFound := map[string]string{
+	// Only docker and git are required; mvn and java must NOT be checked.
+	allRequired := map[string]string{
 		"docker": "/usr/bin/docker",
-		"mvn":    "/usr/bin/mvn",
 		"git":    "/usr/bin/git",
-		"java":   "/usr/bin/java",
 	}
 
 	tests := []struct {
@@ -31,51 +30,45 @@ func TestPreflight_Check(t *testing.T) {
 		found       map[string]string
 		wantErr     bool
 		errContains string
+		wantCount   int
 	}{
 		{
-			name:    "all four binaries found - no error",
-			found:   allFound,
-			wantErr: false,
+			name:      "docker and git present - passes (mvn/java absent is fine)",
+			found:     allRequired,
+			wantErr:   false,
+			wantCount: 2,
+		},
+		{
+			name: "mvn and java absent - still passes",
+			found: map[string]string{
+				"docker": "/usr/bin/docker",
+				"git":    "/usr/bin/git",
+				// mvn and java intentionally absent
+			},
+			wantErr:   false,
+			wantCount: 2,
 		},
 		{
 			name: "docker missing - error names docker",
 			found: map[string]string{
-				"mvn":  "/usr/bin/mvn",
-				"git":  "/usr/bin/git",
-				"java": "/usr/bin/java",
+				"git": "/usr/bin/git",
 			},
 			wantErr:     true,
 			errContains: "docker",
 		},
 		{
-			name: "mvn missing - error names mvn",
-			found: map[string]string{
-				"docker": "/usr/bin/docker",
-				"git":    "/usr/bin/git",
-				"java":   "/usr/bin/java",
-			},
-			wantErr:     true,
-			errContains: "mvn",
-		},
-		{
 			name: "git missing - error names git",
 			found: map[string]string{
 				"docker": "/usr/bin/docker",
-				"mvn":    "/usr/bin/mvn",
-				"java":   "/usr/bin/java",
 			},
 			wantErr:     true,
 			errContains: "git",
 		},
 		{
-			name: "java missing - error names java",
-			found: map[string]string{
-				"docker": "/usr/bin/docker",
-				"mvn":    "/usr/bin/mvn",
-				"git":    "/usr/bin/git",
-			},
+			name:        "both docker and git missing - error mentions docker first",
+			found:       map[string]string{},
 			wantErr:     true,
-			errContains: "java",
+			errContains: "docker",
 		},
 	}
 
@@ -92,8 +85,8 @@ func TestPreflight_Check(t *testing.T) {
 					t.Errorf("error %q does not mention %q", err.Error(), tt.errContains)
 				}
 			}
-			if err == nil && len(statuses) != 4 {
-				t.Errorf("expected 4 ToolStatus entries, got %d", len(statuses))
+			if err == nil && tt.wantCount > 0 && len(statuses) != tt.wantCount {
+				t.Errorf("expected %d ToolStatus entries, got %d", tt.wantCount, len(statuses))
 			}
 		})
 	}

@@ -16,7 +16,8 @@ import (
 var execLookPath = exec.LookPath
 
 // requiredTools lists the binaries that must exist on the host PATH.
-var requiredTools = []string{"docker", "mvn", "git", "java"}
+// Maven (mvn) and a JVM (java) are NOT required — they run inside a Docker container.
+var requiredTools = []string{"docker", "git"}
 
 // defaultDaemonProbeTimeout is the maximum time allowed for the Docker daemon ping.
 const defaultDaemonProbeTimeout = 5 * time.Second
