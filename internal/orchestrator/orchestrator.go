@@ -11,6 +11,7 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/config"
 	"github.com/dbflow-validator/dbflow-validator/internal/container"
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
+	"github.com/dbflow-validator/dbflow-validator/internal/liquibase"
 	"github.com/dbflow-validator/dbflow-validator/internal/maven"
 )
 
@@ -145,7 +146,56 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}
 	pass("readiness-probe", time.Since(t0))
 
-	// --- Step 6a: Inject PostgreSQL driver into cloned pom.xml ---
+	// --- Step 6a: Schema extraction + lb_<schema> user + GRANT-target roles ---
+	// Extract the target schema name from the archetype DDL to derive the
+	// ephemeral connection user (lb_<schema>) and auto-create GRANT-target roles.
+	t0 = time.Now()
+	adminDSN := deps.DBProvider.DSN(coords)
+
+	schemaName, schemaErr := liquibase.ExtractSchemaFromArchetype(cloneRoot)
+	if schemaErr != nil {
+		slog.Warn("cannot extract schema name from archetype; using default admin user",
+			"err", schemaErr)
+	}
+
+	lbUsername := coords.User // default: throwaway admin user
+	lbPassword := coords.Password
+
+	if schemaName != "" {
+		lbUsername = liquibase.LbUsername(schemaName)
+		lbPassword = "lb_v4lid4t0r_pass" // throwaway password for lb user
+
+		// Create the lb_<schema> login role.
+		if err := container.CreateLbUser(ctx, adminDSN, lbUsername, lbPassword); err != nil {
+			return fail("schema-setup", "failed to create lb_<schema> user", err)
+		}
+
+		// Auto-create any GRANT-target roles found in the archetype DDL.
+		grantRoles, _ := liquibase.ExtractGrantTargetRolesFromArchetype(cloneRoot)
+		if len(grantRoles) > 0 {
+			if err := container.CreateRolesIfNotExist(ctx, adminDSN, grantRoles); err != nil {
+				return fail("schema-setup", "failed to create GRANT-target roles", err)
+			}
+		}
+
+		// Grant the lb user CONNECT on the throwaway database.
+		if err := grantLbConnect(ctx, adminDSN, lbUsername, coords.DBName); err != nil {
+			slog.Warn("could not grant CONNECT to lb user; sync may fail with auth error",
+				"user", lbUsername, "err", err)
+		}
+	}
+	pass("schema-setup", time.Since(t0))
+
+	// Build lb_coords with the lb_<schema> user for liquibase.properties patching.
+	lbCoords := domain.ContainerCoords{
+		Host:     coords.Host,
+		Port:     coords.Port,
+		User:     lbUsername,
+		Password: lbPassword,
+		DBName:   coords.DBName,
+	}
+
+	// --- Step 6b: Inject PostgreSQL driver into cloned pom.xml ---
 	// The relational-db-release-manager-plugin is a shaded jar that bundles
 	// Oracle/MySQL/Snowflake drivers but NOT PostgreSQL. The plugin classloader
 	// is isolated; the driver must be declared inside <plugin><dependencies>.
@@ -156,9 +206,9 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}
 	pass("pom-driver-inject", time.Since(t0))
 
-	// --- Step 6b: Patch liquibase.properties ---
+	// --- Step 6c: Patch liquibase.properties ---
 	t0 = time.Now()
-	if err := deps.Patcher.Patch(propsPath, coords); err != nil {
+	if err := deps.Patcher.Patch(propsPath, lbCoords); err != nil {
 		return fail("properties-patch", "failed to patch liquibase.properties", err)
 	}
 	pass("properties-patch", time.Since(t0))
@@ -201,6 +251,15 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}
 
 	return buildReport(started, cfg, overallStatus, steps)
+}
+
+// grantLbConnect grants CONNECT privilege on the given database to lbUsername.
+// This is required so the lb_<schema> user (which is not the Postgres super-user)
+// can connect to the throwaway database.
+func grantLbConnect(ctx context.Context, adminDSN, lbUsername, dbName string) error {
+	return container.ExecSQL(ctx, adminDSN,
+		fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s", dbName, lbUsername),
+	)
 }
 
 // syncParams returns the KV pairs for dbflow:sync.
