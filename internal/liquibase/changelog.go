@@ -97,6 +97,14 @@ func FirstTag(cloneRoot string) (string, error) {
 	return "", domain.ErrNoFirstTag
 }
 
+// ChangelogResolver implements domain.TagResolver by delegating to FirstTag.
+type ChangelogResolver struct{}
+
+// FirstTag satisfies domain.TagResolver for use in orchestrator.Deps.
+func (r *ChangelogResolver) FirstTag(cloneRoot string) (string, error) {
+	return FirstTag(cloneRoot)
+}
+
 // findMasterChangelog returns the path of the single XML file under
 // cloneRoot/masterChangelogDir. Returns an error if the directory doesn't exist
 // or contains no XML files.

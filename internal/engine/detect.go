@@ -99,6 +99,21 @@ func classifyDriver(driver string) Engine {
 	}
 }
 
+// Detector implements domain.EngineDetector by delegating to Detect.
+type Detector struct{}
+
+// NewDetector returns a Detector satisfying domain.EngineDetector.
+func NewDetector() *Detector { return &Detector{} }
+
+// Detect satisfies domain.EngineDetector.
+func (d *Detector) Detect(propsPath string) (string, error) {
+	e, err := Detect(propsPath)
+	return string(e), err
+}
+
+// Ensure Detector satisfies domain.EngineDetector at compile time.
+var _ domain.EngineDetector = (*Detector)(nil)
+
 // readRawProps reads a Java .properties file into a map. Only key=value lines
 // are returned; comments (#/!) and blank lines are skipped.
 func readRawProps(path string) (map[string]string, error) {

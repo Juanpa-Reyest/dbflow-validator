@@ -5,9 +5,13 @@ package preflight
 import (
 	"context"
 	"fmt"
+	"os/exec"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
 )
+
+// execLookPath is the default production LookPath using os/exec.
+var execLookPath = exec.LookPath
 
 // requiredTools lists the binaries that must exist on the host PATH.
 var requiredTools = []string{"docker", "mvn", "git", "java"}
@@ -19,7 +23,11 @@ type Preflight struct {
 }
 
 // New returns a Preflight that uses the provided LookPath func.
+// Pass nil to use exec.LookPath from the standard library.
 func New(lookPath func(string) (string, error)) *Preflight {
+	if lookPath == nil {
+		lookPath = execLookPath
+	}
 	return &Preflight{lookPath: lookPath}
 }
 
