@@ -205,12 +205,20 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	pass("schema-setup", time.Since(t0))
 
 	// Build lb_coords with the lb_<schema> user for liquibase.properties patching.
+	//
+	// DUAL-COORDINATES: the admin path (Host:Port) is used above for provisioning;
+	// the patch path must use AliasHost:AliasPort so the JDBC URL in
+	// liquibase.properties resolves inside the Maven container's Docker network.
+	// Both coords.Host and coords.AliasHost are forwarded; patch.go selects the
+	// alias when AliasHost is non-empty.
 	lbCoords := domain.ContainerCoords{
-		Host:     coords.Host,
-		Port:     coords.Port,
-		User:     lbUsername,
-		Password: lbPassword,
-		DBName:   coords.DBName,
+		Host:      coords.Host,
+		Port:      coords.Port,
+		AliasHost: coords.AliasHost,
+		AliasPort: coords.AliasPort,
+		User:      lbUsername,
+		Password:  lbPassword,
+		DBName:    coords.DBName,
 	}
 
 	// --- Step 6b: Inject PostgreSQL driver into cloned pom.xml ---

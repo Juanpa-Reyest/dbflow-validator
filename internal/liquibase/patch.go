@@ -31,7 +31,15 @@ func (pt *Patcher) Patch(path string, coords domain.ContainerCoords) error {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
 
-	jdbcURL := fmt.Sprintf("jdbc:postgresql://%s:%d/%s", coords.Host, coords.Port, coords.DBName)
+	// Use the Docker network alias when available (Maven container path),
+	// otherwise fall back to the host-mapped port (admin / legacy path).
+	jdbcHost := coords.Host
+	jdbcPort := coords.Port
+	if coords.AliasHost != "" {
+		jdbcHost = coords.AliasHost
+		jdbcPort = coords.AliasPort
+	}
+	jdbcURL := fmt.Sprintf("jdbc:postgresql://%s:%d/%s", jdbcHost, jdbcPort, coords.DBName)
 	props.Set("url", jdbcURL)
 	props.Set("username", coords.User)
 	props.Set("password", coords.Password)

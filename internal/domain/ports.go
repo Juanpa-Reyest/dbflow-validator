@@ -31,12 +31,32 @@ type Cloner interface {
 }
 
 // ContainerCoords holds ephemeral container connection details.
+//
+// DUAL-COORDINATES design: the same Postgres instance is accessed via two paths:
+//   - Host:Port     — mapped host port; used by the Go process for readiness probe
+//                     and admin provisioning (lb_<schema> user, GRANT-target roles,
+//                     bookkeeping schema). Go resolves "127.0.0.1" locally.
+//   - AliasHost:AliasPort — Docker network alias ("postgres":5432); used ONLY in
+//                     the injected liquibase.properties so the Maven container
+//                     (running inside the same Docker network) can reach Postgres.
+//                     Host Go cannot resolve "postgres"; Maven container can.
+//
+// Both coordinates point at the SAME database instance — they differ only in how
+// the TCP path is resolved (host NAT vs. Docker network alias).
 type ContainerCoords struct {
-	Host     string
-	Port     int
-	User     string
-	Password string
-	DBName   string
+	// Host is the host-side address (typically 127.0.0.1) at MappedPort.
+	// Used by the Go process for admin DSN, readiness probe, and provisioning.
+	Host string
+	// Port is the host-side mapped port returned by testcontainers MappedPort.
+	Port int
+	// AliasHost is the Docker network alias for the Postgres container
+	// (e.g. "postgres"). Used in liquibase.properties for the Maven container.
+	AliasHost string
+	// AliasPort is the container-internal port for the alias path (always 5432).
+	AliasPort int
+	User      string
+	Password  string
+	DBName    string
 }
 
 // ContainerProvider starts and stops ephemeral database containers.

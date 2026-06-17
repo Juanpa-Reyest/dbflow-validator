@@ -145,4 +145,79 @@ func TestPatch(t *testing.T) {
 			t.Fatal("Patch() expected error for missing file, got nil")
 		}
 	})
+
+	t.Run("uses AliasHost:AliasPort for JDBC URL when alias fields are set", func(t *testing.T) {
+		dir := t.TempDir()
+		propsPath := dir + "/liquibase.properties"
+
+		initialContent := "url=jdbc:postgresql://localhost:5432/olddb\nusername=old\npassword=old\n"
+		if err := os.WriteFile(propsPath, []byte(initialContent), 0o600); err != nil {
+			t.Fatalf("write initial: %v", err)
+		}
+
+		// Coords with both admin (Host:Port) and alias (AliasHost:AliasPort) set.
+		// Patcher should use AliasHost:AliasPort for the JDBC URL.
+		coords := liquibase.PatchCoords{
+			Host:      "127.0.0.1",
+			Port:      54321,
+			AliasHost: "postgres",
+			AliasPort: 5432,
+			User:      "lb_scgolfcore",
+			Password:  "lb_v4lid4t0r_pass",
+			DBName:    "validatordb",
+		}
+		patcher := liquibase.NewPatcher()
+		if err := patcher.Patch(propsPath, coords); err != nil {
+			t.Fatalf("Patch: %v", err)
+		}
+
+		data, err := os.ReadFile(propsPath)
+		if err != nil {
+			t.Fatalf("read patched: %v", err)
+		}
+		props, _ := liquibase.Parse(data)
+		gotURL := props.Get("url")
+
+		// Must use the alias path, not the host-mapped path.
+		wantURL := "jdbc:postgresql://postgres:5432/validatordb"
+		if gotURL != wantURL {
+			t.Errorf("url = %q, want %q", gotURL, wantURL)
+		}
+		// Host-mapped address must NOT appear in the URL.
+		if bytes.Contains(data, []byte("127.0.0.1")) {
+			t.Errorf("patched url contains host-mapped address 127.0.0.1; expected alias: %s", data)
+		}
+	})
+
+	t.Run("falls back to Host:Port for JDBC URL when AliasHost is empty", func(t *testing.T) {
+		dir := t.TempDir()
+		propsPath := dir + "/liquibase.properties"
+
+		initialContent := "url=jdbc:postgresql://localhost:5432/olddb\nusername=old\npassword=old\n"
+		if err := os.WriteFile(propsPath, []byte(initialContent), 0o600); err != nil {
+			t.Fatalf("write initial: %v", err)
+		}
+
+		coords := liquibase.PatchCoords{
+			Host:     "127.0.0.1",
+			Port:     54321,
+			User:     "ephemeral_user",
+			Password: "ephemeral_pass",
+			DBName:   "testdb",
+			// AliasHost intentionally empty — should fall back to Host:Port.
+		}
+		patcher := liquibase.NewPatcher()
+		if err := patcher.Patch(propsPath, coords); err != nil {
+			t.Fatalf("Patch: %v", err)
+		}
+
+		data, _ := os.ReadFile(propsPath)
+		props, _ := liquibase.Parse(data)
+		gotURL := props.Get("url")
+
+		wantURL := "jdbc:postgresql://127.0.0.1:54321/testdb"
+		if gotURL != wantURL {
+			t.Errorf("fallback url = %q, want %q", gotURL, wantURL)
+		}
+	})
 }
