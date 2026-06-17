@@ -22,17 +22,33 @@ const (
 
 // PostgresProvider implements domain.ContainerProvider for an ephemeral postgres:17.4 container.
 // testcontainers-go handles Ryuk-based cleanup automatically.
+//
+// When networkName is non-empty, the container joins that user-defined Docker network
+// and registers itself with the alias "postgres" so the Maven container can reach it
+// at postgres:5432 from within the same network.
 type PostgresProvider struct {
-	container testcontainers.Container
+	container   testcontainers.Container
+	networkName string // Docker network to join; empty means host networking only.
 }
 
 // NewPostgresProvider returns a PostgresProvider ready to Start.
-func NewPostgresProvider() *PostgresProvider {
-	return &PostgresProvider{}
+// Pass "" for networkName to use the default host-only setup (no Docker network).
+// Pass a non-empty network name (from NewNetwork) to join that network with alias "postgres".
+func NewPostgresProvider(networkName string) *PostgresProvider {
+	return &PostgresProvider{networkName: networkName}
 }
+
+// postgresNetworkAlias is the in-network alias for the Postgres container.
+// Maven containers connect to this alias at port 5432.
+const postgresNetworkAlias = "postgres"
 
 // Start launches an ephemeral postgres:17.4 container on a random free host port
 // and waits until Postgres logs that it is ready to accept connections.
+//
+// When the provider was created with a non-empty networkName, the container also
+// joins that user-defined Docker network with alias "postgres" so it is reachable
+// at postgres:5432 from within the network. The returned ContainerCoords will
+// have both Host:Port (admin/host path) and AliasHost:AliasPort (network path) set.
 //
 // Role creation (lb_<schema>, GRANT-target roles) is NOT done here — it is done
 // by the orchestrator after schema extraction from the archetype DDL, so the set
@@ -50,6 +66,15 @@ func (p *PostgresProvider) Start(ctx context.Context) (domain.ContainerCoords, e
 		WaitingFor: wait.ForLog("database system is ready to accept connections").
 			WithOccurrence(2).
 			WithStartupTimeout(120 * time.Second),
+	}
+
+	// When a Docker network is configured, join it with the "postgres" alias so
+	// Maven containers running in the same network can reach Postgres at postgres:5432.
+	if p.networkName != "" {
+		req.Networks = []string{p.networkName}
+		req.NetworkAliases = map[string][]string{
+			p.networkName: {postgresNetworkAlias},
+		}
 	}
 
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -73,13 +98,22 @@ func (p *PostgresProvider) Start(ctx context.Context) (domain.ContainerCoords, e
 	}
 
 	p.container = c
-	return domain.ContainerCoords{
+
+	coords := domain.ContainerCoords{
 		Host:     host,
 		Port:     int(mappedPort.Num()),
 		User:     throwawayUser,
 		Password: throwawayPass,
 		DBName:   throwawayDB,
-	}, nil
+	}
+
+	// Populate alias coords when a Docker network is in use.
+	if p.networkName != "" {
+		coords.AliasHost = postgresNetworkAlias
+		coords.AliasPort = 5432
+	}
+
+	return coords, nil
 }
 
 // Stop terminates and removes the ephemeral container.

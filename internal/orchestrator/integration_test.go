@@ -75,8 +75,17 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	}
 	t.Log("SQLInput populated with N0001_TA_VALIDATOR_RUN.sql")
 
+	// Create a per-run Docker network so Postgres and Maven containers share alias resolution.
+	ctx := context.Background()
+	_, networkName, networkCleanup, netErr := container.NewNetwork(ctx)
+	if netErr != nil {
+		t.Fatalf("create docker network: %v", netErr)
+	}
+	t.Cleanup(func() { _ = networkCleanup() })
+	t.Logf("docker network: %s", networkName)
+
 	// Wire real adapters.
-	pgContainerProvider := container.NewPostgresProvider()
+	pgContainerProvider := container.NewPostgresProvider(networkName)
 	dbEng, err := engine.ProviderFor(engine.EnginePostgres)
 	if err != nil {
 		t.Fatalf("engine provider: %v", err)
@@ -108,13 +117,14 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	}
 
 	deps := orchestrator.Deps{
-		Preflight:  preflight.New(nil),
-		Cloner:     fakeCloner,
-		DBProvider: realDBProvider,
-		Patcher:    liquibase.NewPatcher(),
-		Engine:     engine.NewDetector(),
-		Tags:       &liquibase.ChangelogResolver{},
-		Maven:      maven.NewRunner("", mavenSettingsPath),
+		Preflight:      preflight.New(nil),
+		Cloner:         fakeCloner,
+		DBProvider:     realDBProvider,
+		Patcher:        liquibase.NewPatcher(),
+		Engine:         engine.NewDetector(),
+		Tags:           &liquibase.ChangelogResolver{},
+		Maven:          maven.NewRunner("", mavenSettingsPath),
+		NetworkCleanup: networkCleanup,
 	}
 
 	cfg := config.Config{
@@ -124,7 +134,7 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	}
 
 	t.Log("Starting end-to-end validation run...")
-	rpt := orchestrator.Run(context.Background(), deps, cfg)
+	rpt := orchestrator.Run(ctx, deps, cfg)
 
 	t.Logf("Overall status: %s", rpt.Status)
 	for _, step := range rpt.Steps {

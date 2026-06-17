@@ -68,7 +68,18 @@ func run(args []string, env func(string) string) int {
 	}()
 
 	// --- 3. Wire concrete adapters ---
-	pgProvider := container.NewPostgresProvider()
+
+	// Create per-run Docker network so Postgres and Maven containers share a DNS alias.
+	// The network cleanup is registered in orchestrator.Run via deps.NetworkCleanup (LIFO).
+	_, networkName, networkCleanup, netErr := container.NewNetwork(ctx)
+	if netErr != nil {
+		fmt.Fprintf(os.Stderr, "dbflow-validator: create docker network: %v\n", netErr)
+		return 2
+	}
+	// Ensure network is removed even if orchestrator.Run panics or exits early.
+	defer func() { _ = networkCleanup() }()
+
+	pgProvider := container.NewPostgresProvider(networkName)
 	dbEng, err := engine.ProviderFor(engine.EnginePostgres)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dbflow-validator: engine provider: %v\n", err)
@@ -86,10 +97,11 @@ func run(args []string, env func(string) string) int {
 			eng:      dbEng,
 			provider: pgProvider,
 		},
-		Patcher: liquibase.NewPatcher(),
-		Engine:  engine.NewDetector(),
-		Tags:    &liquibase.ChangelogResolver{},
-		Maven:   maven.NewRunner("", mavenSettingsPath),
+		Patcher:        liquibase.NewPatcher(),
+		Engine:         engine.NewDetector(),
+		Tags:           &liquibase.ChangelogResolver{},
+		Maven:          maven.NewRunner("", mavenSettingsPath),
+		NetworkCleanup: networkCleanup,
 	}
 
 	// --- 4. Run orchestration ---

@@ -24,6 +24,11 @@ type Deps struct {
 	Engine     domain.EngineDetector
 	Tags       domain.TagResolver
 	Maven      domain.MavenRunner
+	// NetworkCleanup is the cleanup function returned by container.NewNetwork.
+	// When non-nil, it is registered FIRST in the LIFO CleanupRegistry so the
+	// Docker network is torn down LAST (after both containers are stopped).
+	// Leave nil when no Docker network is in use (e.g. unit tests).
+	NetworkCleanup func() error
 	// ReadinessPolicy overrides the default retry policy for the readiness probe.
 	// Leave nil to use container.DefaultRetryPolicy.
 	ReadinessPolicy *container.RetryPolicy
@@ -57,6 +62,13 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 			slog.Warn("cleanup error", "err", e)
 		}
 	}()
+
+	// Register Docker network cleanup FIRST (LIFO = runs LAST).
+	// The network must be torn down after both the Postgres and Maven containers
+	// are stopped; registering first ensures it is the last item executed.
+	if deps.NetworkCleanup != nil {
+		reg.Register(deps.NetworkCleanup)
+	}
 
 	var steps []domain.StepResult
 	overallStatus := domain.StatusPassed
