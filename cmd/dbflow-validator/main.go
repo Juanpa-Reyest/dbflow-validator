@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -42,7 +43,23 @@ func main() {
 }
 
 // run is the testable entry point. It returns the process exit code.
+// Version output goes to os.Stdout.
 func run(args []string, env func(string) string) int {
+	return runWithOutput(args, env, os.Stdout)
+}
+
+// runWithOutput is the fully injectable entry point used by tests.
+// versionOut receives the version line when --version / -v is requested.
+func runWithOutput(args []string, env func(string) string, versionOut io.Writer) int {
+	// Handle --version / -v before flag parsing so it always works regardless of
+	// other flag state and never triggers "flag provided but not defined" errors.
+	for _, a := range args {
+		if a == "--version" || a == "-v" {
+			fmt.Fprintf(versionOut, "dbflow-validator %s\n", buildVersion)
+			return 0
+		}
+	}
+
 	// --- 1. Config resolution ---
 	cfg, err := config.Resolve(args, env)
 	if err != nil {
