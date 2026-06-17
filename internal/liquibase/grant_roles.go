@@ -8,14 +8,15 @@ import (
 )
 
 // grantToRE extracts one or more role names that appear after the TO keyword
-// in a GRANT statement. The regex is intentionally NOT a full SQL parser —
-// it performs bounded extraction of GRANT targets only.
+// in a GRANT statement. It requires the GRANT keyword to appear earlier in the
+// same statement (before the semicolon) so that "TO" in DML string literals,
+// HTML content, or partition clauses (FOR VALUES FROM ... TO ...) is ignored.
 //
 // Matches patterns like:
-//   GRANT ... TO role1
-//   GRANT ... TO role1, role2
-//   ALTER DEFAULT PRIVILEGES ... GRANT ... TO role1
-var grantToRE = regexp.MustCompile(`(?i)\bTO\s+((?:\w+)(?:\s*,\s*\w+)*)`)
+//   GRANT ... TO role1;
+//   GRANT ... TO role1, role2;
+//   ALTER DEFAULT PRIVILEGES ... GRANT ... TO role1;
+var grantToRE = regexp.MustCompile(`(?i)GRANT\b[^;]*\bTO\s+((?:\w+)(?:\s*,\s*\w+)*)`)
 
 // builtinRoles are Postgres pseudo-roles / built-ins that must not be created.
 var builtinRoles = map[string]struct{}{

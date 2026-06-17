@@ -72,3 +72,24 @@ type TagResolver interface {
 type MavenRunner interface {
 	Run(ctx context.Context, cloneRoot string, goal string, params []string, out io.Writer) (StepResult, error)
 }
+
+// PreSyncValidator is an optional extensibility seam for plugging in a SQL-rules
+// validation step BEFORE the ephemeral sync runs — mirroring the real pipeline's
+// validate → validate-ephemeral order.
+//
+// Example future implementation: run the library-script-validator JAR against the
+// cloned SQL files, parse the JSON report, and abort if globalSummary.status is
+// FAIL or ERROR.
+//
+// The default (no-op) implementation is provided by NoOpPreSyncValidator.
+// Implementors receive the cloneRoot directory and must return a non-nil error to
+// abort the pipeline at the pre-sync-validate step.
+type PreSyncValidator interface {
+	ValidatePreSync(ctx context.Context, cloneRoot string) error
+}
+
+// NoOpPreSyncValidator is the default PreSyncValidator that always passes.
+// Wire this when no external rules-validator is configured.
+type NoOpPreSyncValidator struct{}
+
+func (NoOpPreSyncValidator) ValidatePreSync(_ context.Context, _ string) error { return nil }

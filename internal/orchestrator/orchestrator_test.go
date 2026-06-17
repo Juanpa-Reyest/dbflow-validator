@@ -267,3 +267,67 @@ func TestOrchestrator_ReadinessTimeout(t *testing.T) {
 		t.Errorf("expected FAILED, got %v", report.Status)
 	}
 }
+
+// ---- PreSyncValidator seam tests ----
+
+// fakePreSyncValidator is a controllable no-op or error-returning validator.
+type fakePreSyncValidator struct {
+	err error
+}
+
+func (f *fakePreSyncValidator) ValidatePreSync(ctx context.Context, cloneRoot string) error {
+	return f.err
+}
+
+// TestOrchestrator_PreSyncValidator_NoOp verifies that a nil PreSyncValidator
+// (no-op default) does not break the happy path.
+func TestOrchestrator_PreSyncValidator_NoOp(t *testing.T) {
+	deps := happyDeps(t)
+	// Explicitly set nil — should use the no-op default.
+	deps.PreSyncValidator = nil
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Errorf("expected PASSED with nil PreSyncValidator, got %v; steps: %+v", report.Status, report.Steps)
+	}
+}
+
+// TestOrchestrator_PreSyncValidator_PassThrough verifies that a no-error validator
+// is called without disrupting the pipeline.
+func TestOrchestrator_PreSyncValidator_PassThrough(t *testing.T) {
+	deps := happyDeps(t)
+	deps.PreSyncValidator = &fakePreSyncValidator{err: nil}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Errorf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+}
+
+// TestOrchestrator_PreSyncValidator_Failure verifies that a failing validator
+// aborts the pipeline before dbflow:sync is attempted.
+func TestOrchestrator_PreSyncValidator_Failure(t *testing.T) {
+	deps := happyDeps(t)
+	deps.PreSyncValidator = &fakePreSyncValidator{err: errors.New("SQL rules violation: missing rollback")}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusFailed {
+		t.Errorf("expected FAILED, got %v", report.Status)
+	}
+	// The failure step name must identify the pre-sync validation step.
+	var preValidStep *domain.StepResult
+	for i := range report.Steps {
+		if report.Steps[i].Name == "pre-sync-validate" {
+			preValidStep = &report.Steps[i]
+			break
+		}
+	}
+	if preValidStep == nil {
+		t.Error("expected step 'pre-sync-validate' in report, not found")
+	} else if preValidStep.Status != domain.StepStatusFailed {
+		t.Errorf("expected pre-sync-validate FAILED, got %v", preValidStep.Status)
+	}
+}

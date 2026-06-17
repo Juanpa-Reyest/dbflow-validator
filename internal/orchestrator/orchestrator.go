@@ -27,6 +27,11 @@ type Deps struct {
 	// ReadinessPolicy overrides the default retry policy for the readiness probe.
 	// Leave nil to use container.DefaultRetryPolicy.
 	ReadinessPolicy *container.RetryPolicy
+	// PreSyncValidator is an optional extensibility seam for plugging in a SQL-rules
+	// validation step before dbflow:sync. Leave nil to use the no-op default.
+	// When set, ValidatePreSync is called after properties-patch and before sync.
+	// A non-nil error aborts the pipeline with step name "pre-sync-validate".
+	PreSyncValidator domain.PreSyncValidator
 }
 
 // Run executes the full linear validation flow:
@@ -178,10 +183,23 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 			}
 		}
 
-		// Grant the lb user CONNECT on the throwaway database.
-		if err := grantLbConnect(ctx, adminDSN, lbUsername, coords.DBName); err != nil {
-			slog.Warn("could not grant CONNECT to lb user; sync may fail with auth error",
-				"user", lbUsername, "err", err)
+		// Grant the lb user CONNECT and CREATE on the throwaway database.
+		// CONNECT is required to establish sessions; CREATE is required so the lb
+		// user can create the application schema (scgolfcore, etc.) inside the DB.
+		// Mirrors ambientacion.sql: GRANT CONNECT, CREATE ON DATABASE dbtest TO scliquibase.
+		if err := container.GrantConnectCreateOnDatabase(ctx, adminDSN, coords.DBName, lbUsername); err != nil {
+			slog.Warn("could not grant CONNECT, CREATE on database to lb user; sync may fail",
+				"user", lbUsername, "db", coords.DBName, "err", err)
+		}
+
+		// Create the lb_<schema> bookkeeping schema owned by the lb user.
+		// Liquibase resolves DATABASECHANGELOG via search_path "$user" — it looks for
+		// the schema matching the connection username. Without this schema, Liquibase
+		// falls back to public and may fail with permission errors.
+		// Mirrors ambientacion.sql: CREATE SCHEMA scliquibase; ALTER SCHEMA scliquibase OWNER TO scliquibase.
+		if err := container.CreateLbBookkeepingSchema(ctx, adminDSN, lbUsername); err != nil {
+			slog.Warn("could not create lb bookkeeping schema; sync may fail with schema errors",
+				"schema", lbUsername, "err", err)
 		}
 	}
 	pass("schema-setup", time.Since(t0))
@@ -212,6 +230,20 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		return fail("properties-patch", "failed to patch liquibase.properties", err)
 	}
 	pass("properties-patch", time.Since(t0))
+
+	// --- Step 6d: Pre-sync validation (optional seam) ---
+	// When a PreSyncValidator is wired, it runs here — before the ephemeral sync —
+	// mirroring the real pipeline's validate → validate-ephemeral order.
+	// A nil validator is treated as the no-op default (always passes).
+	t0 = time.Now()
+	preSyncValidator := deps.PreSyncValidator
+	if preSyncValidator == nil {
+		preSyncValidator = domain.NoOpPreSyncValidator{}
+	}
+	if err := preSyncValidator.ValidatePreSync(ctx, cloneRoot); err != nil {
+		return fail("pre-sync-validate", "pre-sync validation failed", err)
+	}
+	pass("pre-sync-validate", time.Since(t0))
 
 	// --- Step 7: dbflow:sync ---
 	t0 = time.Now()
@@ -251,15 +283,6 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}
 
 	return buildReport(started, cfg, overallStatus, steps)
-}
-
-// grantLbConnect grants CONNECT privilege on the given database to lbUsername.
-// This is required so the lb_<schema> user (which is not the Postgres super-user)
-// can connect to the throwaway database.
-func grantLbConnect(ctx context.Context, adminDSN, lbUsername, dbName string) error {
-	return container.ExecSQL(ctx, adminDSN,
-		fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s", dbName, lbUsername),
-	)
 }
 
 // syncParams returns the KV pairs for dbflow:sync.

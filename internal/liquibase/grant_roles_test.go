@@ -53,6 +53,19 @@ GRANT SELECT ON ALL TABLES IN SCHEMA scgolfcore TO readonly;`,
 			wantRoles: nil,
 		},
 		{
+			// DML files can contain large HTML/text blobs with "TO activate",
+			// "pay TO", "access TO", etc. The regex MUST require GRANT context
+			// so those false positives are not treated as GRANT targets.
+			name:      "DML string with TO in non-GRANT context is ignored",
+			sql:       `INSERT INTO templates VALUES (1, 'To activate your account, you need TO confirm.');`,
+			wantRoles: nil,
+		},
+		{
+			name:      "partition clause FOR VALUES FROM/TO is ignored",
+			sql:       `CREATE TABLE foo PARTITION OF bar FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');`,
+			wantRoles: nil,
+		},
+		{
 			name: "scgolfcore DCL fixture (representative)",
 			sql: `-- =====================================================
 CREATE SCHEMA IF NOT EXISTS scgolfcore;

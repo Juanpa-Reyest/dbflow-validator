@@ -67,9 +67,10 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	// (avoids needing a real git remote for the e2e test).
 	fakeCloner := &localCloner{root: tmpArchetype}
 
-	// Resolve vendored Maven settings.xml from project root
-	// (integration test runs from internal/orchestrator, so go up 3 levels).
-	projectRoot := filepath.Join("..", "..", "..")
+	// Resolve vendored Maven settings.xml from project root.
+	// The test binary runs from internal/orchestrator/ which is 2 levels deep
+	// inside the project root (dbflow-validator/). Go up 2 levels, not 3.
+	projectRoot := filepath.Join("..", "..")
 	projectRootAbs, _ := filepath.Abs(projectRoot)
 	mavenSettingsPath := ""
 	if repoPath, err := internalvendor.FindVendorRepository(projectRootAbs); err == nil {
