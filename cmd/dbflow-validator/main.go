@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/config"
@@ -27,6 +28,7 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/orchestrator"
 	"github.com/dbflow-validator/dbflow-validator/internal/preflight"
 	"github.com/dbflow-validator/dbflow-validator/internal/report"
+	internalvendor "github.com/dbflow-validator/dbflow-validator/internal/vendor"
 )
 
 func main() {
@@ -73,6 +75,10 @@ func run(args []string, env func(string) string) int {
 		return 2
 	}
 
+	// Resolve vendored Maven repo (relative to binary location or cwd).
+	// Falls back to empty string (system Maven repo) on failure.
+	mavenSettingsPath := resolveMavenSettings()
+
 	deps := orchestrator.Deps{
 		Preflight: preflight.New(nil),
 		Cloner:    git.NewCloner(nil, nil),
@@ -83,7 +89,7 @@ func run(args []string, env func(string) string) int {
 		Patcher: liquibase.NewPatcher(),
 		Engine:  engine.NewDetector(),
 		Tags:    &liquibase.ChangelogResolver{},
-		Maven:   maven.NewRunner(""),
+		Maven:   maven.NewRunner("", mavenSettingsPath),
 	}
 
 	// --- 4. Run orchestration ---
@@ -146,4 +152,47 @@ func (p *postgresDBProvider) DSN(coords domain.ContainerCoords) string {
 }
 func (p *postgresDBProvider) Ping(ctx context.Context, dsn string) error {
 	return container.Ping(ctx, dsn)
+}
+
+// resolveMavenSettings locates the embedded mvn-vendor/repository relative to the
+// binary's parent directory (dev: project root, prod: binary install dir) and
+// writes a settings.xml into a temp directory that Maven will use for this run.
+// Returns the settings.xml path, or "" if the vendored repo is not found
+// (Maven will fall back to ~/.m2 in that case).
+func resolveMavenSettings() string {
+	// Try binary location first (works for built binaries).
+	exe, err := os.Executable()
+	if err == nil {
+		projectRoot := filepath.Dir(exe)
+		if path := tryWriteSettings(projectRoot); path != "" {
+			return path
+		}
+	}
+	// Fall back to the current working directory (works during `go run` and tests).
+	cwd, err := os.Getwd()
+	if err == nil {
+		if path := tryWriteSettings(cwd); path != "" {
+			return path
+		}
+	}
+	slog.Warn("mvn-vendor/repository not found; Maven will use the host ~/.m2 repo")
+	return ""
+}
+
+func tryWriteSettings(projectRoot string) string {
+	repoPath, err := internalvendor.FindVendorRepository(projectRoot)
+	if err != nil {
+		return ""
+	}
+	dir, err := os.MkdirTemp("", "dbflow-mvn-settings-*")
+	if err != nil {
+		slog.Warn("cannot create temp dir for settings.xml", "err", err)
+		return ""
+	}
+	settingsPath, err := internalvendor.WriteSettingsXML(dir, repoPath)
+	if err != nil {
+		slog.Warn("cannot write settings.xml", "err", err)
+		return ""
+	}
+	return settingsPath
 }

@@ -52,15 +52,19 @@ func FormatParams(pairs []KV) string {
 type Runner struct {
 	// mvnBin is the path to the mvn binary. Defaults to "mvn" (resolved via PATH).
 	mvnBin string
+	// settingsPath is the optional path to a Maven settings.xml file passed via -s.
+	// When non-empty, all mvn invocations include "-s <settingsPath>".
+	settingsPath string
 }
 
 // NewRunner creates a Runner that invokes the given mvn binary.
 // Pass "" to use "mvn" from PATH.
-func NewRunner(mvnBin string) *Runner {
+// Pass "" for settingsPath to use Maven's default settings.
+func NewRunner(mvnBin, settingsPath string) *Runner {
 	if mvnBin == "" {
 		mvnBin = "mvn"
 	}
-	return &Runner{mvnBin: mvnBin}
+	return &Runner{mvnBin: mvnBin, settingsPath: settingsPath}
 }
 
 // Run executes mvn -f <cloneRoot>/pom.xml -B <goal> -Dparams="<space-separated params>"
@@ -93,9 +97,12 @@ func (r *Runner) Run(
 	args := []string{
 		"-f", pomPath,
 		"-B",
-		goal,
-		"-Dparams=" + paramStr,
 	}
+	// Inject custom settings.xml when specified (e.g., vendored offline repo).
+	if r.settingsPath != "" {
+		args = append(args, "-s", r.settingsPath)
+	}
+	args = append(args, goal, "-Dparams="+paramStr)
 
 	cmd := exec.CommandContext(ctx, r.mvnBin, args...)
 	cmd.Dir = cloneRoot

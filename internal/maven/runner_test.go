@@ -122,7 +122,7 @@ func TestMavenRunner_Run(t *testing.T) {
 				t.Fatalf("write pom: %v", err)
 			}
 
-			runner := maven.NewRunner(fakeMvn)
+			runner := maven.NewRunner(fakeMvn, "")
 			var out bytes.Buffer
 			result, err := runner.Run(
 				context.Background(),
@@ -163,7 +163,7 @@ func TestMavenRunner_CtxCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	runner := maven.NewRunner(script)
+	runner := maven.NewRunner(script, "")
 	var out bytes.Buffer
 	result, _ := runner.Run(ctx, cloneDir, maven.GoalSync, nil, &out)
 	if result.Status != domain.StepStatusAborted {
@@ -192,7 +192,7 @@ func TestMavenRunner_TagUnique(t *testing.T) {
 		t.Fatalf("write pom: %v", err)
 	}
 
-	runner := maven.NewRunner(script)
+	runner := maven.NewRunner(script, "")
 	for range tags {
 		runner.Run(context.Background(), cloneDir, maven.GoalSync,
 			[]string{"--AUTHOR=validator-cli"}, &bytes.Buffer{})

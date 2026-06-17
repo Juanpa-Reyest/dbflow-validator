@@ -17,6 +17,7 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/maven"
 	"github.com/dbflow-validator/dbflow-validator/internal/orchestrator"
 	"github.com/dbflow-validator/dbflow-validator/internal/preflight"
+	internalvendor "github.com/dbflow-validator/dbflow-validator/internal/vendor"
 )
 
 // TestEndToEnd_HappyPath runs the REAL flow against the reference archetype
@@ -66,6 +67,21 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	// (avoids needing a real git remote for the e2e test).
 	fakeCloner := &localCloner{root: tmpArchetype}
 
+	// Resolve vendored Maven settings.xml from project root
+	// (integration test runs from internal/orchestrator, so go up 3 levels).
+	projectRoot := filepath.Join("..", "..", "..")
+	projectRootAbs, _ := filepath.Abs(projectRoot)
+	mavenSettingsPath := ""
+	if repoPath, err := internalvendor.FindVendorRepository(projectRootAbs); err == nil {
+		settingsDir := t.TempDir()
+		if sp, err := internalvendor.WriteSettingsXML(settingsDir, repoPath); err == nil {
+			mavenSettingsPath = sp
+			t.Logf("using vendored Maven settings: %s", mavenSettingsPath)
+		}
+	} else {
+		t.Logf("mvn-vendor/repository not found (%v); Maven will use ~/.m2", err)
+	}
+
 	deps := orchestrator.Deps{
 		Preflight:  preflight.New(nil),
 		Cloner:     fakeCloner,
@@ -73,7 +89,7 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 		Patcher:    liquibase.NewPatcher(),
 		Engine:     engine.NewDetector(),
 		Tags:       &liquibase.ChangelogResolver{},
-		Maven:      maven.NewRunner(""),
+		Maven:      maven.NewRunner("", mavenSettingsPath),
 	}
 
 	cfg := config.Config{

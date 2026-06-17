@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <plugins>
+    <plugin>
+      <name>SQL Release Manager</name>
+      <prefix>dbflow</prefix>
+      <artifactId>relational-db-release-manager-plugin</artifactId>
+    </plugin>
+  </plugins>
+</metadata>
