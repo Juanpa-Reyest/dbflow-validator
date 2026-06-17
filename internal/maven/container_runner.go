@@ -11,6 +11,7 @@ import (
 
 	dockercontainer "github.com/moby/moby/api/types/container"
 	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
 )
@@ -104,20 +105,32 @@ func (r *ContainerRunner) Run(
 		// Entrypoint is empty — use the default image entrypoint (mvn).
 		Cmd: cmd,
 		HostConfigModifier: func(hc *dockercontainer.HostConfig) {
-			hc.Binds = []string{
-				cloneRoot + ":/work:rw",
-				r.repoCachePath + ":/m2:ro",
+			binds := []string{cloneRoot + ":/work:rw"}
+			if r.repoCachePath != "" {
+				binds = append(binds, r.repoCachePath+":/m2:ro")
 			}
+			hc.Binds = binds
 		},
+		// Wait until the Maven container exits before returning from GenericContainer.
+		// This allows c.Logs() to return the complete Maven output (no streaming needed).
+		// Timeout is intentionally absent — context cancellation handles deadline.
+		WaitingFor: wait.ForExit(),
 	}
 
-	// Set --user on Linux when not running as root, so files written into the
-	// mounted clone dir are owned by the host user (not root) and os.RemoveAll
-	// in cleanup succeeds without permission errors.
-	if runtime.GOOS == "linux" && r.uid != 0 {
-		userStr := fmt.Sprintf("%d:%d", r.uid, r.gid)
-		req.ConfigModifier = func(c *dockercontainer.Config) {
-			c.User = userStr
+	// ConfigModifier sets the working directory to /work (so Java's user.dir is the
+	// project root, resolving relative paths correctly) and the --user flag on Linux
+	// (so files written into /work are owned by the host user, not root).
+	req.ConfigModifier = func(c *dockercontainer.Config) {
+		// Set working directory to /work (Maven project root inside the container).
+		// The plugin resolves relative paths from user.dir (Java CWD), not just
+		// Maven's basedir, so this is required for correct directory creation.
+		c.WorkingDir = "/work"
+
+		// Set --user on Linux when not running as root so files written into /work
+		// (the mounted clone dir) are owned by the host user, not root.
+		// Skipped on non-Linux and when UID=0 (root) to avoid permission issues.
+		if runtime.GOOS == "linux" && r.uid != 0 {
+			c.User = fmt.Sprintf("%d:%d", r.uid, r.gid)
 		}
 	}
 
