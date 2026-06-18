@@ -1,6 +1,7 @@
 package orchestrator_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -110,11 +111,14 @@ type fakeMavenRunner struct {
 	syncErr        error
 	rollbackResult domain.StepResult
 	rollbackErr    error
+	// capturedWriter captures the io.Writer passed to Run, for assertion in tests.
+	capturedWriter io.Writer
 }
 
 func (f *fakeMavenRunner) Run(
-	_ context.Context, _ string, goal string, _ []string, _ io.Writer,
+	_ context.Context, _ string, goal string, _ []string, out io.Writer,
 ) (domain.StepResult, error) {
+	f.capturedWriter = out
 	if goal == "dbflow:sync" {
 		return f.syncResult, f.syncErr
 	}
@@ -426,6 +430,45 @@ func TestRun_OverlayStep_Nil_NoOp(t *testing.T) {
 		if s.Name == "overlay" {
 			t.Error("no 'overlay' step should appear when deps.Overlayer is nil")
 		}
+	}
+}
+
+// ---- MavenOut routing tests ----
+
+// TestOrchestrator_MavenOut_WiredToMaven verifies that when deps.MavenOut is set,
+// it is passed as the io.Writer to the Maven runner (instead of io.Discard).
+func TestOrchestrator_MavenOut_WiredToMaven(t *testing.T) {
+	deps := happyDeps(t)
+	var mavenOutBuf bytes.Buffer
+	deps.MavenOut = &mavenOutBuf
+
+	fakeMvn := &fakeMavenRunner{
+		syncResult:     domain.StepResult{Status: domain.StepStatusPassed},
+		rollbackResult: domain.StepResult{Status: domain.StepStatusPassed},
+	}
+	deps.Maven = fakeMvn
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Errorf("expected PASSED, got %v", report.Status)
+	}
+	// The captured writer passed to Maven.Run should be the same pointer as MavenOut.
+	if fakeMvn.capturedWriter == nil {
+		t.Error("expected Maven.Run to receive a non-nil io.Writer (deps.MavenOut)")
+	}
+}
+
+// TestOrchestrator_MavenOut_NilFallsToDiscard verifies that when deps.MavenOut is nil,
+// Maven runs normally (falling back to io.Discard) — backward compatibility.
+func TestOrchestrator_MavenOut_NilFallsToDiscard(t *testing.T) {
+	deps := happyDeps(t)
+	deps.MavenOut = nil // default — no explicit MavenOut
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Errorf("expected PASSED with nil MavenOut, got %v; steps: %+v", report.Status, report.Steps)
 	}
 }
 

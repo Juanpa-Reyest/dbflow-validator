@@ -1,9 +1,9 @@
 package orchestrator
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -38,6 +38,18 @@ type Deps struct {
 	// ContainerRunner can pick it up at /work/settings.xml inside the Maven container.
 	// Leave empty to use the host's default Maven settings (not recommended for production).
 	MavenRepoCachePath string
+	// MavenOut is the io.Writer that receives Maven container stdout/stderr.
+	// When non-nil it is passed directly to deps.Maven.Run so Maven output flows to
+	// both the live console and execution.log (dual-sink). When nil, io.Discard is used.
+	MavenOut io.Writer
+	// RunDir is the per-run artifacts directory (<output-dir>/<timestamp>/).
+	// Set by main.go after resolving rundir.RunDirPath. Empty string means
+	// run-dir creation failed (degraded mode) — no file artifacts written.
+	RunDir string
+	// KeepWorkspace, when true, retains the ephemeral clone under <run>/workspace/
+	// even on a PASSED run. Mirrors cfg.KeepWorkspace but is threaded via Deps to
+	// keep the cleanup logic inside the orchestrator.
+	KeepWorkspace bool
 	// ReadinessPolicy overrides the default retry policy for the readiness probe.
 	// Leave nil to use container.DefaultRetryPolicy.
 	ReadinessPolicy *container.RetryPolicy
@@ -329,10 +341,17 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}
 	pass("pre-sync-validate", time.Since(t0))
 
+	// Resolve the Maven output writer: use MavenOut if provided, otherwise discard.
+	// MavenOut is wired in main.go to logging.MavenWriter(os.Stderr, logFile) so
+	// Maven stdout/stderr flows to both the live console and execution.log.
+	mavenOut := deps.MavenOut
+	if mavenOut == nil {
+		mavenOut = io.Discard
+	}
+
 	// --- Step 7: dbflow:sync ---
 	t0 = time.Now()
-	var syncOutput bytes.Buffer
-	syncResult, err := deps.Maven.Run(ctx, cloneRoot, maven.GoalSync, syncParams(), &syncOutput)
+	syncResult, err := deps.Maven.Run(ctx, cloneRoot, maven.GoalSync, syncParams(), mavenOut)
 	if err != nil {
 		return fail(maven.GoalSync, "maven runner error during sync", err)
 	}
@@ -354,8 +373,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 
 	// --- Step 9: dbflow:rollback ---
 	t0 = time.Now()
-	var rollbackOutput bytes.Buffer
-	rollbackResult, err := deps.Maven.Run(ctx, cloneRoot, maven.GoalRollback, rollbackParams(firstTag), &rollbackOutput)
+	rollbackResult, err := deps.Maven.Run(ctx, cloneRoot, maven.GoalRollback, rollbackParams(firstTag), mavenOut)
 	if err != nil {
 		return fail(maven.GoalRollback, "maven runner error during rollback", err)
 	}
