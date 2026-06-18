@@ -333,6 +333,102 @@ func TestOrchestrator_PreSyncValidator_Failure(t *testing.T) {
 	}
 }
 
+// ---- Overlay step tests (Phase 5) ----
+
+// fakeOverlayer records calls and returns a controllable result.
+type fakeOverlayer struct {
+	called bool
+	copied int
+	err    error
+}
+
+func (f *fakeOverlayer) Apply(_, _ string) (int, error) {
+	f.called = true
+	return f.copied, f.err
+}
+
+// makeHappyDepsWithSQLInput creates happyDeps pre-populated with a temp SQLInput dir
+// containing at least one .sql file, so the fail-fast guard passes.
+func makeHappyDepsWithSQLInput(t *testing.T) (orchestrator.Deps, config.Config, string) {
+	t.Helper()
+	deps := happyDeps(t)
+	sqlDir := t.TempDir()
+	// Write a dummy .sql file so the input-check guard passes.
+	if err := os.WriteFile(filepath.Join(sqlDir, "dummy.sql"), []byte("-- dummy"), 0o600); err != nil {
+		t.Fatalf("write dummy sql: %v", err)
+	}
+	cfg := testCfg()
+	cfg.SQLInputPath = sqlDir
+	return deps, cfg, sqlDir
+}
+
+// TestRun_OverlayStep_Wired verifies that when deps.Overlayer is set, the "overlay"
+// step appears in Steps between "engine-guard" and "container-start".
+func TestRun_OverlayStep_Wired(t *testing.T) {
+	deps, cfg, _ := makeHappyDepsWithSQLInput(t)
+	ol := &fakeOverlayer{copied: 1}
+	deps.Overlayer = ol
+
+	report := orchestrator.Run(context.Background(), deps, cfg)
+
+	if report.Status != domain.StatusPassed {
+		t.Errorf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+	if !ol.called {
+		t.Error("expected Overlayer.Apply to be called")
+	}
+
+	// Find step positions.
+	engineGuardIdx := -1
+	overlayIdx := -1
+	containerStartIdx := -1
+	for i, s := range report.Steps {
+		switch s.Name {
+		case "engine-guard":
+			engineGuardIdx = i
+		case "overlay":
+			overlayIdx = i
+		case "container-start":
+			containerStartIdx = i
+		}
+	}
+
+	if overlayIdx == -1 {
+		t.Fatal("expected 'overlay' step in report, not found")
+	}
+	if engineGuardIdx == -1 || containerStartIdx == -1 {
+		t.Fatalf("expected 'engine-guard' and 'container-start' steps; indices: %d, %d", engineGuardIdx, containerStartIdx)
+	}
+	if overlayIdx <= engineGuardIdx {
+		t.Errorf("overlay step (%d) must come AFTER engine-guard (%d)", overlayIdx, engineGuardIdx)
+	}
+	if overlayIdx >= containerStartIdx {
+		t.Errorf("overlay step (%d) must come BEFORE container-start (%d)", overlayIdx, containerStartIdx)
+	}
+	// Overlay step must be PASSED.
+	if report.Steps[overlayIdx].Status != domain.StepStatusPassed {
+		t.Errorf("expected overlay PASSED, got %v", report.Steps[overlayIdx].Status)
+	}
+}
+
+// TestRun_OverlayStep_Nil_NoOp verifies that when deps.Overlayer is nil,
+// no "overlay" step appears and the run completes normally.
+func TestRun_OverlayStep_Nil_NoOp(t *testing.T) {
+	deps, cfg, _ := makeHappyDepsWithSQLInput(t)
+	deps.Overlayer = nil // explicitly nil
+
+	report := orchestrator.Run(context.Background(), deps, cfg)
+
+	if report.Status != domain.StatusPassed {
+		t.Errorf("expected PASSED with nil Overlayer, got %v; steps: %+v", report.Status, report.Steps)
+	}
+	for _, s := range report.Steps {
+		if s.Name == "overlay" {
+			t.Error("no 'overlay' step should appear when deps.Overlayer is nil")
+		}
+	}
+}
+
 // ---- Fail-fast guard tests (Phase 3) ----
 
 // mockCloner tracks whether Clone was called — used to assert the cloner was NOT invoked.

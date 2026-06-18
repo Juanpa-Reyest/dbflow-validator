@@ -29,6 +29,7 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/liquibase"
 	"github.com/dbflow-validator/dbflow-validator/internal/maven"
 	"github.com/dbflow-validator/dbflow-validator/internal/orchestrator"
+	"github.com/dbflow-validator/dbflow-validator/internal/overlay"
 	"github.com/dbflow-validator/dbflow-validator/internal/preflight"
 	"github.com/dbflow-validator/dbflow-validator/internal/report"
 )
@@ -182,6 +183,7 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		Maven:              maven.NewContainerRunner(maven.DefaultImage, networkName, mavenRepoCachePath, uid, gid),
 		NetworkCleanup:     networkCleanup,
 		MavenRepoCachePath: mavenRepoCachePath,
+		Overlayer:          overlay.New(),
 	}
 
 	// --- 4. Run orchestration ---
