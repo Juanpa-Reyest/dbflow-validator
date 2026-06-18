@@ -134,12 +134,46 @@ Run `dbflow-validator --help` for the full list any time.
 | `--output-format` | `console` | `console` or `json` |
 | `--output-file` | — | Write the JSON result to this path |
 | `--log-level` | `info` | `debug`, `info`, `warn`, `error` |
+| `--output-dir` | `./dbflow-validator-runs` | Directory for per-run artifact subdirectories |
+| `--keep-workspace` | `false` | Retain the ephemeral clone under `<run>/workspace/` even on a PASSED run |
 | `--version`, `-v` | — | Print the version and exit |
 | `--help`, `-h` | — | Print help and exit |
 
 | Environment variable | Description |
 |----------------------|-------------|
 | `DBFLOW_GIT_TOKEN` | Git access token for HTTPS URLs (instead of the interactive prompt; never logged). Not needed for SSH URLs. |
+
+### Run artifacts
+
+Every run creates a timestamped subdirectory under `--output-dir` (default `./dbflow-validator-runs`):
+
+```
+dbflow-validator-runs/
+  20240315T090507Z/       ← timestamp: sortable, filesystem-safe (no colons)
+    execution.log         ← full verbose trace (always written, regardless of --log-level)
+    report.json           ← machine-readable validation result (always written)
+    workspace/            ← ephemeral clone retained here on FAILED runs
+```
+
+**`execution.log`** records everything: step boundaries with timings, the exact (redacted) Maven command lines, full Maven stdout/stderr, container IDs, Docker network names, overlay file list, and the resolved rollback tag. This verbosity is written unconditionally — the `--log-level` flag only controls what appears on the console.
+
+**`report.json`** is always written to the run dir (regardless of `--output-format`). It is the same JSON schema as `--output-file` output and is useful for post-mortem scripting.
+
+**`workspace/`** contains the full ephemeral clone (your archetype + injected SQL files). It is:
+- Retained on **FAILED** runs so you can inspect the generated changelog XML under
+  `workspace/src/main/resources/db/schema/changelog/` and the patched `liquibase.properties`.
+- Retained on **any** run when `--keep-workspace` is set.
+- Removed on **PASSED** runs (unless `--keep-workspace` is set) — nothing to debug.
+
+The git token and container credentials never appear in any persisted file.
+
+**Disk usage note:** each run retains the full clone (~tens of MB). Prune periodically:
+
+```bash
+rm -rf dbflow-validator-runs/
+```
+
+`dbflow-validator-runs/` and the local binary `/dbflow-validator` are listed in `.gitignore` so they are never accidentally committed.
 
 ### Exit codes
 

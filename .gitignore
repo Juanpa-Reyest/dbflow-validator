@@ -1,1 +1,9 @@
 dist/
+
+# Per-run artifacts directory — contains execution.log, report.json, and
+# the ephemeral clone (workspace/) retained on FAILED runs.
+# Prune manually when disk space is a concern: rm -rf dbflow-validator-runs/
+dbflow-validator-runs/
+
+# Built binary (local build via `go build` or `make build`).
+/dbflow-validator
