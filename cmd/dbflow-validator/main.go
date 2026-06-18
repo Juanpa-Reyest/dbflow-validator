@@ -152,7 +152,7 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 	// --- 2. Create run dir early (before any network or orchestrator ops) ---
 	// Creating early ensures even early failures get an execution.log.
 	// On failure: warn to console, set runDir = "" (degraded mode — console only).
-	runDirPath := rundir.RunDirPath(cfg.OutputDir, time.Now().UTC())
+	runDirPath := rundir.RunDirPath(cfg.OutputDir, time.Now())
 	var logFile *os.File
 	if err := os.MkdirAll(runDirPath, 0o700); err != nil {
 		slog.Warn("could not create run dir; run artifacts will not be written",
