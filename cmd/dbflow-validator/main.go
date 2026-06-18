@@ -175,10 +175,8 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		}
 	}
 
-	// Ensure the log file is closed after the run (flush before writing report.json).
-	if logFile != nil {
-		defer logFile.Close()
-	}
+	// logFile is closed manually after the structured execution.log is written.
+	// Do NOT defer here — we need to reopen/truncate it after the run.
 
 	// --- 3. Signal-safe context ---
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -248,11 +246,29 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 	// --- 5. Run orchestration ---
 	rpt := orchestrator.Run(ctx, deps, cfg)
 
-	// --- 6. Console output (always) ---
-	consoleRenderer := report.NewConsoleRenderer()
-	consoleRenderer.Render(rpt, os.Stdout)
+	// --- 6. Close live log file and render structured execution.log ---
+	// During the run the dual-sink logger wrote a raw live trace to execution.log
+	// (crash-safety). Now that the run is complete, we close the file, render the
+	// final structured document (banner + summary table + block traces), and
+	// overwrite execution.log with the human-readable result.
+	if logFile != nil {
+		_ = logFile.Close()
+		logFile = nil
+	}
+	runID := filepath.Base(runDirPath)
+	if runDirPath != "" {
+		execLogDoc := report.RenderExecLog(rpt, runID, buildVersion, "")
+		logFilePath := filepath.Join(runDirPath, "execution.log")
+		if err := os.WriteFile(logFilePath, []byte(execLogDoc), 0o600); err != nil {
+			slog.Warn("could not write structured execution.log", "path", logFilePath, "err", err)
+		}
+	}
 
-	// --- 7. JSON output (when requested via --output-format or --output-file) ---
+	// --- 7. Console output (quiet: banner + progress summary + result pointer) ---
+	fmt.Fprint(os.Stdout, report.Banner(buildVersion))
+	report.NewConsoleRenderer().RenderQuiet(rpt, runDirPath, os.Stdout)
+
+	// --- 8. JSON output (when requested via --output-format or --output-file) ---
 	if cfg.OutputFormat == "json" || cfg.OutputFile != "" {
 		jsonRenderer := report.NewJSONRenderer()
 		jsonBytes, err := jsonRenderer.Render(rpt)
@@ -271,7 +287,7 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		}
 	}
 
-	// --- 8. Always write report.json to the run dir ---
+	// --- 9. Always write report.json to the run dir ---
 	// This is written regardless of --output-format so every run leaves a
 	// machine-readable record for post-mortem inspection.
 	if runDirPath != "" {
@@ -287,7 +303,7 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		}
 	}
 
-	// --- 9. Exit code ---
+	// --- 10. Exit code ---
 	return exitCode(rpt.Status)
 }
 

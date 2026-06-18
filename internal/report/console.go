@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
 )
@@ -88,6 +90,61 @@ func (r *ConsoleRenderer) Render(report domain.RunReport, w io.Writer) {
 		}
 	}
 	fmt.Fprintf(w, "\n")
+}
+
+// RenderQuiet writes a concise, human-readable summary to w suitable for the terminal.
+// It shows only:
+//   - one high-level progress line per step (▸ <name> … OK/FAILED <dur>)
+//   - the overall RESULT line
+//   - a closing pointer to execution.log (when runDir is non-empty)
+//
+// Verbose Maven traces and minute-level detail are omitted; they live in execution.log.
+func (r *ConsoleRenderer) RenderQuiet(rpt domain.RunReport, runDir string, w io.Writer) {
+	totalDur := time.Duration(rpt.TotalDurMs) * time.Millisecond
+
+	for _, s := range rpt.Steps {
+		glyph := "✔"
+		label := "OK"
+		if s.Status != domain.StepStatusPassed {
+			glyph = "✘"
+			label = string(s.Status)
+		}
+		dur := formatConsoleDuration(s.Duration)
+		fmt.Fprintf(w, "  %s %-30s %s (%s)\n", glyph, s.Name, label, dur)
+	}
+
+	fmt.Fprintln(w)
+
+	overallGlyph := "✔"
+	if rpt.Status != domain.StatusPassed {
+		overallGlyph = "✘"
+	}
+	fmt.Fprintf(w, "  RESULT  %s  %-12s  total %s\n",
+		overallGlyph, string(rpt.Status), formatConsoleDuration(totalDur))
+
+	if runDir != "" {
+		logPath := filepath.Join(runDir, "execution.log")
+		fmt.Fprintf(w, "\n  Detalles completos → %s\n", logPath)
+	}
+}
+
+// formatConsoleDuration formats duration for console display.
+func formatConsoleDuration(d time.Duration) string {
+	if d == 0 {
+		return "0ms"
+	}
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	m := int(d.Minutes())
+	s := int(d.Seconds()) % 60
+	if s == 0 {
+		return fmt.Sprintf("%dm", m)
+	}
+	return fmt.Sprintf("%dm %ds", m, s)
 }
 
 // isTerminal returns true if w is likely a file descriptor attached to a terminal.
