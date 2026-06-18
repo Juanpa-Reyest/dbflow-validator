@@ -253,6 +253,91 @@ func TestResolveWithPrompter(t *testing.T) {
 	}
 }
 
+// TestResolve_OutputDirAndKeepWorkspace verifies the new --output-dir and
+// --keep-workspace flags added in the run-diagnostics change.
+func TestResolve_OutputDirAndKeepWorkspace(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		check func(t *testing.T, cfg config.Config)
+	}{
+		{
+			name: "--output-dir default is dbflow-validator-runs (relative to cwd)",
+			args: []string{"--repo-url", "https://host/repo.git"},
+			check: func(t *testing.T, cfg config.Config) {
+				t.Helper()
+				if !filepath.IsAbs(cfg.OutputDir) {
+					t.Errorf("OutputDir should be absolute, got %q", cfg.OutputDir)
+				}
+				if !strings.HasSuffix(cfg.OutputDir, "dbflow-validator-runs") {
+					t.Errorf("OutputDir should end with dbflow-validator-runs, got %q", cfg.OutputDir)
+				}
+			},
+		},
+		{
+			name: "--output-dir explicit absolute value",
+			args: []string{"--repo-url", "https://host/repo.git", "--output-dir", "/tmp/my-runs"},
+			check: func(t *testing.T, cfg config.Config) {
+				t.Helper()
+				if cfg.OutputDir != "/tmp/my-runs" {
+					t.Errorf("OutputDir: got %q, want /tmp/my-runs", cfg.OutputDir)
+				}
+			},
+		},
+		{
+			name: "--keep-workspace default is false",
+			args: []string{"--repo-url", "https://host/repo.git"},
+			check: func(t *testing.T, cfg config.Config) {
+				t.Helper()
+				if cfg.KeepWorkspace {
+					t.Error("KeepWorkspace default should be false")
+				}
+			},
+		},
+		{
+			name: "--keep-workspace flag sets to true",
+			args: []string{"--repo-url", "https://host/repo.git", "--keep-workspace"},
+			check: func(t *testing.T, cfg config.Config) {
+				t.Helper()
+				if !cfg.KeepWorkspace {
+					t.Error("KeepWorkspace should be true when --keep-workspace is passed")
+				}
+			},
+		},
+		{
+			name: "OutputDir and KeepWorkspace do not appear as secrets in String()",
+			args: []string{"--repo-url", "https://host/repo.git", "--output-dir", "/tmp/runs", "--keep-workspace"},
+			check: func(t *testing.T, cfg config.Config) {
+				t.Helper()
+				repr := cfg.String()
+				if !strings.Contains(repr, "OutputDir") {
+					t.Errorf("String() should contain OutputDir, got %q", repr)
+				}
+				if !strings.Contains(repr, "KeepWorkspace") {
+					t.Errorf("String() should contain KeepWorkspace, got %q", repr)
+				}
+			},
+		},
+	}
+
+	env := func(key string) string {
+		if key == "DBFLOW_GIT_TOKEN" {
+			return "tok"
+		}
+		return ""
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := config.Resolve(tt.args, env)
+			if err != nil {
+				t.Fatalf("Resolve() unexpected error: %v", err)
+			}
+			tt.check(t, cfg)
+		})
+	}
+}
+
 // TestResolveSSH verifies that SSH URLs bypass the token requirement entirely.
 func TestResolveSSH(t *testing.T) {
 	t.Run("scp-style SSH URL via flag: no token required, no prompt called", func(t *testing.T) {

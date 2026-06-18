@@ -24,6 +24,7 @@ const (
 	defaultFormat    = "console"
 	defaultLogLvl    = "info"
 	defaultSQLInput  = "src/main/resources/SQLInput"
+	defaultOutputDir = "dbflow-validator-runs"
 )
 
 // Config holds all resolved inputs for a validation run.
@@ -38,13 +39,20 @@ type Config struct {
 	LogLevel     string
 	// Token is stored as a Secret so it never leaks via fmt or JSON.
 	Token domain.Secret
+	// OutputDir is the absolute path to the directory where per-run artifact
+	// subdirectories are created. Resolved from --output-dir (default:
+	// ./dbflow-validator-runs relative to the working directory at parse time).
+	OutputDir string
+	// KeepWorkspace, when true, retains the ephemeral clone under <run>/workspace/
+	// even on a PASSED run. Normally the clone is removed on success.
+	KeepWorkspace bool
 }
 
 // String returns a human-readable representation that NEVER includes the token value.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{RepoURL:%q BaseBranch:%q SQLInputPath:%q OutputFormat:%q OutputFile:%q LogLevel:%q Token:%s}",
-		c.RepoURL, c.BaseBranch, c.SQLInputPath, c.OutputFormat, c.OutputFile, c.LogLevel, c.Token,
+		"Config{RepoURL:%q BaseBranch:%q SQLInputPath:%q OutputFormat:%q OutputFile:%q LogLevel:%q Token:%s OutputDir:%q KeepWorkspace:%v}",
+		c.RepoURL, c.BaseBranch, c.SQLInputPath, c.OutputFormat, c.OutputFile, c.LogLevel, c.Token, c.OutputDir, c.KeepWorkspace,
 	)
 }
 
@@ -161,12 +169,14 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 	fs := flag.NewFlagSet("dbflow-validator", flag.ContinueOnError)
 
 	var (
-		repoURL      string
-		baseBranch   string
-		sqlInputPath string
-		outputFormat string
-		outputFile   string
-		logLevel     string
+		repoURL       string
+		baseBranch    string
+		sqlInputPath  string
+		outputFormat  string
+		outputFile    string
+		logLevel      string
+		outputDir     string
+		keepWorkspace bool
 	)
 
 	fs.StringVar(&repoURL, "repo-url", "", "Repository URL to clone and validate")
@@ -175,6 +185,8 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 	fs.StringVar(&outputFormat, "output-format", defaultFormat, "Output format: console or json (default: console)")
 	fs.StringVar(&outputFile, "output-file", "", "Path to write JSON output (optional)")
 	fs.StringVar(&logLevel, "log-level", defaultLogLvl, "Log level: debug, info, warn, error (default: info)")
+	fs.StringVar(&outputDir, "output-dir", "", "Directory for per-run artifact subdirectories (default: ./dbflow-validator-runs)")
+	fs.BoolVar(&keepWorkspace, "keep-workspace", false, "Retain the ephemeral clone under <run>/workspace/ even on a PASSED run")
 
 	// Discard usage output; callers handle errors themselves.
 	var usageBuf strings.Builder
@@ -232,13 +244,31 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 		resolvedSQLInput = filepath.Join(cwd, resolvedSQLInput)
 	}
 
+	// Resolve OutputDir: use flag value if provided, otherwise default relative to cwd.
+	resolvedOutputDir := outputDir
+	if resolvedOutputDir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve cwd for --output-dir default: %w", err)
+		}
+		resolvedOutputDir = filepath.Join(cwd, defaultOutputDir)
+	} else if !filepath.IsAbs(resolvedOutputDir) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve cwd for --output-dir: %w", err)
+		}
+		resolvedOutputDir = filepath.Join(cwd, resolvedOutputDir)
+	}
+
 	return Config{
-		RepoURL:      repoURL,
-		BaseBranch:   baseBranch,
-		SQLInputPath: resolvedSQLInput,
-		OutputFormat: outputFormat,
-		OutputFile:   outputFile,
-		LogLevel:     logLevel,
-		Token:        token,
+		RepoURL:       repoURL,
+		BaseBranch:    baseBranch,
+		SQLInputPath:  resolvedSQLInput,
+		OutputFormat:  outputFormat,
+		OutputFile:    outputFile,
+		LogLevel:      logLevel,
+		Token:         token,
+		OutputDir:     resolvedOutputDir,
+		KeepWorkspace: keepWorkspace,
 	}, nil
 }
