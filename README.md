@@ -83,20 +83,47 @@ The token is typed hidden and is **never** written to disk, logs, or anywhere �
 
 ## What you'll see
 
-```
-[PASSED] preflight        (12 ms)
-[PASSED] clone            (3421 ms)
-[PASSED] start-postgres   (8304 ms)
-[PASSED] patch            (2 ms)
-[PASSED] dbflow:sync      (26311 ms)
-[PASSED] first-tag        (1 ms)
-[PASSED] dbflow:rollback  (13266 ms)
+The console is intentionally quiet — you see only high-level progress:
 
-Overall: PASSED
+```
+══════════════════════════════════════════════════════════════════
+   ██████╗ ██████╗ ███████╗██╗      ██████╗ ██╗    ██╗
+   ██╔══██╗██╔══██╗██╔════╝██║     ██╔═══██╗██║    ██║
+   ██║  ██║██████╔╝█████╗  ██║     ██║   ██║██║ █╗ ██║
+   ██║  ██║██╔══██╗██╔══╝  ██║     ██║   ██║██║███╗██║
+   ██████╔╝██████╔╝██║     ███████╗╚██████╔╝╚███╔███╔╝
+   ╚═════╝ ╚═════╝ ╚═╝     ╚══════╝ ╚═════╝  ╚══╝╚══╝
+        V · A · L · I · D · A · T · O · R   v0.1
+──────────────────────────────────────────────────────────────────
+   Local database-change validation · fail fast before the PR
+   zero side-effects
+   ✒  Juanpa Reyest · Development Engineer
+      ╭───────────╮
+      │ ▸ ~/ _     │
+      ╰───────────╯
+══════════════════════════════════════════════════════════════════
+
+  ✔ preflight                    OK (16ms)
+  ✔ dbflow:sync                  OK (26s)
+  ✔ dbflow:rollback              OK (13s)
+
+  RESULT  ✔  PASSED          total 39s
+
+  Detalles completos → dbflow-validator-runs/2026-06-18_19-45-06/execution.log
+```
+
+On **FAILED** runs the output shows `✘` and the failing step's error message:
+
+```
+  ✘ dbflow:rollback              FAILED (13s)
+
+  RESULT  ✘  FAILED          total 1m 12s
+
+  Detalles completos → dbflow-validator-runs/2026-06-18_19-45-06/execution.log
 ```
 
 - **PASSED** → your changes apply and roll back cleanly. Good to open your PR.
-- **FAILED** → the full Maven trace is printed so you can see exactly what broke.
+- **FAILED** → the console shows the status; the **full trace is in `execution.log`** (see below).
 
 ---
 
@@ -149,15 +176,26 @@ Every run creates a timestamped subdirectory under `--output-dir` (default `./db
 
 ```
 dbflow-validator-runs/
-  20240315T090507Z/       ← timestamp: sortable, filesystem-safe (no colons)
-    execution.log         ← full verbose trace (always written, regardless of --log-level)
-    report.json           ← machine-readable validation result (always written)
+  2026-06-18_19-45-06/    ← timestamp: YYYY-MM-DD_HH-MM-SS (local time, human-readable)
+    execution.log         ← full structured report: banner + step table + block traces
+    report.json           ← machine-readable validation result (for IDE/CI integration)
     workspace/            ← ephemeral clone retained here on FAILED runs
 ```
 
-**`execution.log`** records everything: step boundaries with timings, the exact (redacted) Maven command lines, full Maven stdout/stderr, container IDs, Docker network names, overlay file list, and the resolved rollback tag. This verbosity is written unconditionally — the `--log-level` flag only controls what appears on the console.
+**`execution.log`** is the full enterprise output document, structured top-to-bottom as:
+1. The banner (version + tagline + signature)
+2. `RUN <run-id>  ·  branch: <branch>  ·  schema: <schema>` header
+3. Step summary table with ✔/✘ glyphs, step number, name, duration; failing steps show the error on an indented `└─` line
+4. `RESULT  ✔/✘ STATUS   total <dur>` line
+5. `DETALLE DE EJECUCIÓN` section — each step's full captured trace in a framed block:
+   ```
+   ┌─[ STEP 07 ]── DBFLOW:SYNC ────────────────────── ✔ 26s ─┐
+   │  [INFO] BUILD SUCCESS
+   │  [INFO] Sync complete
+   └─────────────────────────────────────────────────────────┘
+   ```
 
-**`report.json`** is always written to the run dir (regardless of `--output-format`). It is the same JSON schema as `--output-file` output and is useful for post-mortem scripting.
+**`report.json`** is always written to the run dir (regardless of `--output-format`). It is machine-readable (same JSON schema as `--output-file` output) and is intended for IDE/CI integration and post-mortem scripting — NOT for human consumption; use `execution.log` for that.
 
 **`workspace/`** contains the full ephemeral clone (your archetype + injected SQL files). It is:
 - Retained on **FAILED** runs so you can inspect the generated changelog XML under
