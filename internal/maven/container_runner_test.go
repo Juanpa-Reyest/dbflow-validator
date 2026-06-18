@@ -9,6 +9,52 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/maven"
 )
 
+// TestContainerRunner_HomeEnvSet verifies that BuildContainerRequest sets HOME=/tmp
+// so the Maven container does not attempt to write to /root/.m2 when running as
+// a non-root host UID (which would emit "cannot create directory '/root'" warning).
+func TestContainerRunner_HomeEnvSet(t *testing.T) {
+	req := maven.BuildContainerRequest(
+		maven.DefaultImage,
+		"dbflow-net-test",
+		"/tmp/m2-cache",
+		1000, // non-root UID
+		1000,
+		"/tmp/cloneroot",
+		"dbflow:sync",
+		[]string{"--TAG=test", "--AUTHOR=validator-cli"},
+	)
+
+	home, ok := req.Env["HOME"]
+	if !ok {
+		t.Error("ContainerRequest.Env must contain HOME key to avoid /root/.m2 permission warning")
+	}
+	if home != "/tmp" {
+		t.Errorf("ContainerRequest.Env[HOME] = %q; want /tmp", home)
+	}
+}
+
+// TestContainerRunner_HomeEnvSetWhenRoot verifies HOME=/tmp is set even for root UID
+// so the image default (/root/.m2) is overridden regardless of UID.
+func TestContainerRunner_HomeEnvSetWhenRoot(t *testing.T) {
+	req := maven.BuildContainerRequest(
+		maven.DefaultImage,
+		"dbflow-net-test",
+		"",   // no repo cache
+		0, 0, // root UID/GID
+		"/tmp/cloneroot",
+		"dbflow:sync",
+		[]string{"--TAG=test"},
+	)
+
+	home, ok := req.Env["HOME"]
+	if !ok {
+		t.Error("ContainerRequest.Env must contain HOME even for root UID")
+	}
+	if home != "/tmp" {
+		t.Errorf("ContainerRequest.Env[HOME] = %q; want /tmp", home)
+	}
+}
+
 // TestMapContainerResult exercises the pure exit-code + BUILD-FAILURE mapping
 // used by ContainerRunner. This is the direct coverage for WARNING-1 in the
 // verify report: the ContainerRunner failure-path mapping was previously only

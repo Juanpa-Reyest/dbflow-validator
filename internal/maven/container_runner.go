@@ -59,12 +59,79 @@ func NewContainerRunner(image, networkName, repoCachePath string, uid, gid int) 
 	}
 }
 
+// BuildContainerRequest constructs the testcontainers.ContainerRequest for a Maven run.
+// This is exported so that unit tests can inspect the request structure (e.g. assert
+// that HOME=/tmp is set to prevent the /root/.m2 permission warning).
+//
+// The request sets:
+//   - Image, Networks, Cmd (mvn invocation), HostConfigModifier (volume mounts).
+//   - Env["HOME"] = "/tmp" so Maven writes .m2 to /tmp instead of /root/.m2.
+//     This suppresses "mkdir: cannot create directory '/root': Permission denied"
+//     when the container runs as a non-root host UID (via --user UID:GID).
+//   - ConfigModifier: WorkingDir=/work, and --user UID:GID on Linux (non-root).
+func BuildContainerRequest(
+	image, networkName, repoCachePath string,
+	uid, gid int,
+	cloneRoot, goal string,
+	params []string,
+) testcontainers.ContainerRequest {
+	paramStr := strings.Join(params, " ")
+	cmd := []string{
+		"mvn",
+		"-f", "/work/pom.xml",
+		"-B",
+		"-s", "/work/settings.xml",
+		"-Dmaven.repo.local=/m2",
+		goal,
+		"-Dparams=" + paramStr,
+	}
+
+	req := testcontainers.ContainerRequest{
+		Image:    image,
+		Networks: []string{networkName},
+		Cmd:      cmd,
+		// Set HOME=/tmp so Maven writes .m2 to /tmp instead of /root/.m2.
+		// Without this, running as a non-root host UID (--user UID:GID) causes
+		// the entrypoint to print "mkdir: cannot create directory '/root': Permission denied"
+		// because the image's default $HOME is /root, which is not writable by other UIDs.
+		Env: map[string]string{
+			"HOME": "/tmp",
+		},
+		HostConfigModifier: func(hc *dockercontainer.HostConfig) {
+			binds := []string{cloneRoot + ":/work:rw"}
+			if repoCachePath != "" {
+				binds = append(binds, repoCachePath+":/m2:ro")
+			}
+			hc.Binds = binds
+		},
+		// Wait until the Maven container exits before returning from GenericContainer.
+		// Timeout is intentionally absent — context cancellation handles deadline.
+		WaitingFor: wait.ForExit(),
+	}
+
+	// ConfigModifier sets the working directory to /work (so Java's user.dir is the
+	// project root, resolving relative paths correctly) and the --user flag on Linux
+	// (so files written into /work are owned by the host user, not root).
+	req.ConfigModifier = func(c *dockercontainer.Config) {
+		c.WorkingDir = "/work"
+		// Set --user on Linux when not running as root so files written into /work
+		// (the mounted clone dir) are owned by the host user, not root.
+		// Skipped on non-Linux and when UID=0 (root) to avoid permission issues.
+		if runtime.GOOS == "linux" && uid != 0 {
+			c.User = fmt.Sprintf("%d:%d", uid, gid)
+		}
+	}
+
+	return req
+}
+
 // Run executes mvn inside a freshly-created Maven container on the shared Docker network.
 //
 // The container:
 //   - Mounts cloneRoot at /work (rw) — pom.xml, settings.xml, and archetype sources.
 //   - Mounts repoCachePath at /m2 (ro) — vendored plugin + JDBC driver for offline resolution.
 //   - Runs as the host UID:GID on Linux so files written into /work are not root-owned.
+//   - Sets HOME=/tmp so Maven does not attempt to write to /root/.m2 (permission warning fix).
 //   - Streams stdout/stderr to `out` and captures the full trace.
 //   - Is removed when Run returns (AutoRemove / Terminate).
 //
@@ -85,54 +152,12 @@ func (r *ContainerRunner) Run(
 	// Inject unique TAG if not already present.
 	uniqueTag := time.Now().Format(time.RFC3339Nano)
 	finalParams := ensureTagStr(params, uniqueTag)
-	paramStr := strings.Join(finalParams, " ")
 
-	// Build the Maven command executed inside the container.
-	// settings.xml is expected at /work/settings.xml (written by orchestrator into clone dir).
-	cmd := []string{
-		"mvn",
-		"-f", "/work/pom.xml",
-		"-B",
-		"-s", "/work/settings.xml",
-		"-Dmaven.repo.local=/m2",
-		goal,
-		"-Dparams=" + paramStr,
-	}
-
-	req := testcontainers.ContainerRequest{
-		Image:    r.image,
-		Networks: []string{r.networkName},
-		// Entrypoint is empty — use the default image entrypoint (mvn).
-		Cmd: cmd,
-		HostConfigModifier: func(hc *dockercontainer.HostConfig) {
-			binds := []string{cloneRoot + ":/work:rw"}
-			if r.repoCachePath != "" {
-				binds = append(binds, r.repoCachePath+":/m2:ro")
-			}
-			hc.Binds = binds
-		},
-		// Wait until the Maven container exits before returning from GenericContainer.
-		// This allows c.Logs() to return the complete Maven output (no streaming needed).
-		// Timeout is intentionally absent — context cancellation handles deadline.
-		WaitingFor: wait.ForExit(),
-	}
-
-	// ConfigModifier sets the working directory to /work (so Java's user.dir is the
-	// project root, resolving relative paths correctly) and the --user flag on Linux
-	// (so files written into /work are owned by the host user, not root).
-	req.ConfigModifier = func(c *dockercontainer.Config) {
-		// Set working directory to /work (Maven project root inside the container).
-		// The plugin resolves relative paths from user.dir (Java CWD), not just
-		// Maven's basedir, so this is required for correct directory creation.
-		c.WorkingDir = "/work"
-
-		// Set --user on Linux when not running as root so files written into /work
-		// (the mounted clone dir) are owned by the host user, not root.
-		// Skipped on non-Linux and when UID=0 (root) to avoid permission issues.
-		if runtime.GOOS == "linux" && r.uid != 0 {
-			c.User = fmt.Sprintf("%d:%d", r.uid, r.gid)
-		}
-	}
+	req := BuildContainerRequest(
+		r.image, r.networkName, r.repoCachePath,
+		r.uid, r.gid,
+		cloneRoot, goal, finalParams,
+	)
 
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
