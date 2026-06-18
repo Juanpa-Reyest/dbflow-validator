@@ -47,7 +47,8 @@ Usage:
 
 Flags:
   --repo-url      string   Git repository URL to clone and validate (required, or interactive)
-  --base-branch   string   Branch to validate (default: integracion)
+  --base-branch   string   Branch to validate (default: integration)
+  --sql-input     string   Path to local SQLInput directory (default: ./src/main/resources/SQLInput)
   --output-format string   Output format: console or json (default: console)
   --output-file   string   Path to write JSON output (optional)
   --log-level     string   Log verbosity: debug, info, warn, error (default: info)
@@ -61,7 +62,7 @@ Examples:
   # Non-interactive (flags + env var):
   DBFLOW_GIT_TOKEN=<token> dbflow-validator \
     --repo-url https://github.com/org/db-artifacts-myproject.git \
-    --base-branch integracion \
+    --base-branch integration \
     --output-format console
 
   # JSON output to file:

@@ -108,12 +108,12 @@ You don't have to use the prompt. You can pass everything as options:
 # HTTPS: provide the token via environment variable + the repo via a flag
 DBFLOW_GIT_TOKEN=<your-token> dbflow-validator \
   --repo-url https://github.com/your-org/your-archetype.git \
-  --base-branch integracion
+  --base-branch integration
 
 # SSH: no token needed — uses your existing SSH keys automatically
 dbflow-validator \
   --repo-url git@github.com:your-org/your-archetype.git \
-  --base-branch integracion
+  --base-branch integration
 
 # Get machine-readable JSON instead of the console view
 DBFLOW_GIT_TOKEN=<your-token> dbflow-validator \
@@ -129,7 +129,8 @@ Run `dbflow-validator --help` for the full list any time.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--repo-url` | — | Repository to clone and validate (asked interactively if omitted) |
-| `--base-branch` | `integracion` | Branch to validate |
+| `--base-branch` | `integration` | Branch to validate |
+| `--sql-input` | `./src/main/resources/SQLInput` | Path to local SQLInput directory |
 | `--output-format` | `console` | `console` or `json` |
 | `--output-file` | — | Write the JSON result to this path |
 | `--log-level` | `info` | `debug`, `info`, `warn`, `error` |

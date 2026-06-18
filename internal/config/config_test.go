@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -85,13 +86,13 @@ func TestResolve(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "default base-branch is integracion",
+			name: "default base-branch is integration",
 			args: []string{"--repo-url", "https://host/repo.git"},
 			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
-				if cfg.BaseBranch != "integracion" {
-					t.Errorf("BaseBranch: got %q, want %q", cfg.BaseBranch, "integracion")
+				if cfg.BaseBranch != "integration" {
+					t.Errorf("BaseBranch: got %q, want %q", cfg.BaseBranch, "integration")
 				}
 			},
 		},
@@ -199,6 +200,33 @@ func TestResolveWithPrompter(t *testing.T) {
 			prompter:    nil,
 			wantErr:     true,
 			errContains: "repo-url",
+		},
+		{
+			name: "--sql-input omitted defaults to absolute cwd/src/main/resources/SQLInput",
+			args: []string{"--repo-url", "https://host/repo.git"},
+			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			prompter: &mockPromptReader{},
+			check: func(t *testing.T, cfg config.Config) {
+				t.Helper()
+				if !filepath.IsAbs(cfg.SQLInputPath) {
+					t.Errorf("SQLInputPath should be absolute, got %q", cfg.SQLInputPath)
+				}
+				if !strings.HasSuffix(cfg.SQLInputPath, "src/main/resources/SQLInput") {
+					t.Errorf("SQLInputPath should end with src/main/resources/SQLInput, got %q", cfg.SQLInputPath)
+				}
+			},
+		},
+		{
+			name: "--sql-input explicit path used as-is",
+			args: []string{"--repo-url", "https://host/repo.git", "--sql-input", "/custom/SQLInput"},
+			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			prompter: &mockPromptReader{},
+			check: func(t *testing.T, cfg config.Config) {
+				t.Helper()
+				if cfg.SQLInputPath != "/custom/SQLInput" {
+					t.Errorf("SQLInputPath: got %q, want /custom/SQLInput", cfg.SQLInputPath)
+				}
+			},
 		},
 	}
 

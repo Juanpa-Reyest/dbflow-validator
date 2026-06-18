@@ -40,4 +40,7 @@ var (
 	ErrCloneFailed        = errors.New("repository clone failed")
 	ErrContainerFailed    = errors.New("container start failed")
 	ErrPropertiesMissing  = errors.New("liquibase.properties file not found")
+	// ErrNoPendingSQL is returned when the local SQLInput directory is missing or
+	// contains no .sql files. The tool must exit with the config/usage code (2).
+	ErrNoPendingSQL = errors.New("no pending SQL found — nothing to validate")
 )

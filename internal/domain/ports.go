@@ -113,3 +113,16 @@ type PreSyncValidator interface {
 type NoOpPreSyncValidator struct{}
 
 func (NoOpPreSyncValidator) ValidatePreSync(_ context.Context, _ string) error { return nil }
+
+// Overlayer copies the developer's local SQLInput tree into the freshly-cloned
+// repository's SQLInput directory before sync.
+//
+// Apply clears destSQLInputDir first (clear-then-copy semantics), then
+// recursively copies all files from srcDir, preserving subdirectory hierarchy.
+// Only regular .sql files are copied; symlinks and device files are skipped.
+//
+// Returns ErrNoPendingSQL (wrapped) if srcDir contains no .sql files.
+// Returns (copied int, err error) where copied is the number of files written.
+type Overlayer interface {
+	Apply(srcDir, destSQLInputDir string) (copied int, err error)
+}

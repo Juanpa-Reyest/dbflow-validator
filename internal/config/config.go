@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/moby/term"
@@ -18,16 +19,20 @@ import (
 )
 
 const (
-	tokenEnvVar   = "DBFLOW_GIT_TOKEN"
-	defaultBranch = "integracion"
-	defaultFormat = "console"
-	defaultLogLvl = "info"
+	tokenEnvVar      = "DBFLOW_GIT_TOKEN"
+	defaultBranch    = "integration"
+	defaultFormat    = "console"
+	defaultLogLvl    = "info"
+	defaultSQLInput  = "src/main/resources/SQLInput"
 )
 
 // Config holds all resolved inputs for a validation run.
 type Config struct {
 	RepoURL      string
 	BaseBranch   string
+	// SQLInputPath is the absolute path to the developer's local SQLInput directory.
+	// Resolved from the --sql-input flag (or its default) at parse time using os.Getwd().
+	SQLInputPath string
 	OutputFormat string
 	OutputFile   string
 	LogLevel     string
@@ -38,8 +43,8 @@ type Config struct {
 // String returns a human-readable representation that NEVER includes the token value.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{RepoURL:%q BaseBranch:%q OutputFormat:%q OutputFile:%q LogLevel:%q Token:%s}",
-		c.RepoURL, c.BaseBranch, c.OutputFormat, c.OutputFile, c.LogLevel, c.Token,
+		"Config{RepoURL:%q BaseBranch:%q SQLInputPath:%q OutputFormat:%q OutputFile:%q LogLevel:%q Token:%s}",
+		c.RepoURL, c.BaseBranch, c.SQLInputPath, c.OutputFormat, c.OutputFile, c.LogLevel, c.Token,
 	)
 }
 
@@ -158,13 +163,15 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 	var (
 		repoURL      string
 		baseBranch   string
+		sqlInputPath string
 		outputFormat string
 		outputFile   string
 		logLevel     string
 	)
 
 	fs.StringVar(&repoURL, "repo-url", "", "Repository URL to clone and validate")
-	fs.StringVar(&baseBranch, "base-branch", defaultBranch, "Branch to validate (default: integracion)")
+	fs.StringVar(&baseBranch, "base-branch", defaultBranch, "Branch to validate (default: integration)")
+	fs.StringVar(&sqlInputPath, "sql-input", "", "Path to local SQLInput directory (default: ./src/main/resources/SQLInput)")
 	fs.StringVar(&outputFormat, "output-format", defaultFormat, "Output format: console or json (default: console)")
 	fs.StringVar(&outputFile, "output-file", "", "Path to write JSON output (optional)")
 	fs.StringVar(&logLevel, "log-level", defaultLogLvl, "Log level: debug, info, warn, error (default: info)")
@@ -209,9 +216,26 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 		}
 	}
 
+	// Resolve SQLInputPath: use flag value if provided, otherwise default relative to cwd.
+	resolvedSQLInput := sqlInputPath
+	if resolvedSQLInput == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve cwd for --sql-input default: %w", err)
+		}
+		resolvedSQLInput = filepath.Join(cwd, defaultSQLInput)
+	} else if !filepath.IsAbs(resolvedSQLInput) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve cwd for --sql-input: %w", err)
+		}
+		resolvedSQLInput = filepath.Join(cwd, resolvedSQLInput)
+	}
+
 	return Config{
 		RepoURL:      repoURL,
 		BaseBranch:   baseBranch,
+		SQLInputPath: resolvedSQLInput,
 		OutputFormat: outputFormat,
 		OutputFile:   outputFile,
 		LogLevel:     logLevel,
