@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/config"
 	"github.com/dbflow-validator/dbflow-validator/internal/container"
@@ -27,11 +28,13 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/engine"
 	"github.com/dbflow-validator/dbflow-validator/internal/git"
 	"github.com/dbflow-validator/dbflow-validator/internal/liquibase"
+	"github.com/dbflow-validator/dbflow-validator/internal/logging"
 	"github.com/dbflow-validator/dbflow-validator/internal/maven"
 	"github.com/dbflow-validator/dbflow-validator/internal/orchestrator"
 	"github.com/dbflow-validator/dbflow-validator/internal/overlay"
 	"github.com/dbflow-validator/dbflow-validator/internal/preflight"
 	"github.com/dbflow-validator/dbflow-validator/internal/report"
+	"github.com/dbflow-validator/dbflow-validator/internal/rundir"
 )
 
 // buildVersion is injected at link time via -ldflags "-X main.buildVersion=<version>".
@@ -53,6 +56,8 @@ Flags:
   --output-format string   Output format: console or json (default: console)
   --output-file   string   Path to write JSON output (optional)
   --log-level     string   Log verbosity: debug, info, warn, error (default: info)
+  --output-dir    string   Directory for per-run artifact subdirectories (default: ./dbflow-validator-runs)
+  --keep-workspace         Retain the ephemeral clone under <run>/workspace/ even on a PASSED run
   --version / -v           Print version and exit
   --help / -h              Print this help and exit
 
@@ -72,8 +77,23 @@ Examples:
     --output-format json \
     --output-file result.json
 
+  # Retain workspace on any outcome (useful for debugging):
+  DBFLOW_GIT_TOKEN=<token> dbflow-validator \
+    --repo-url https://github.com/org/db-artifacts-myproject.git \
+    --keep-workspace
+
   # Interactive (TTY): prompts for URL and token when not provided:
   dbflow-validator
+
+Run artifacts:
+  Each run creates a timestamped subdirectory under --output-dir:
+    <output-dir>/<20060102T150405Z>/
+      execution.log   Full verbose trace (always written, regardless of --log-level)
+      report.json     Machine-readable validation result (always written)
+      workspace/      Clone retained here on FAILED runs (or when --keep-workspace is set)
+
+  To prune old runs: rm -rf dbflow-validator-runs/
+  The dbflow-validator-runs/ directory and the binary itself are listed in .gitignore.
 
 Exit codes:
   0   Validation PASSED
@@ -123,14 +143,44 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		return 2
 	}
 
-	// Configure structured logging.
+	// Resolve log level before creating the dual-sink logger.
 	logLevel := slog.LevelInfo
 	if cfg.LogLevel == "debug" {
 		logLevel = slog.LevelDebug
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
 
-	// --- 2. Signal-safe context ---
+	// --- 2. Create run dir early (before any network or orchestrator ops) ---
+	// Creating early ensures even early failures get an execution.log.
+	// On failure: warn to console, set runDir = "" (degraded mode — console only).
+	runDirPath := rundir.RunDirPath(cfg.OutputDir, time.Now().UTC())
+	var logFile *os.File
+	if err := os.MkdirAll(runDirPath, 0o700); err != nil {
+		slog.Warn("could not create run dir; run artifacts will not be written",
+			"dir", runDirPath, "err", err)
+		runDirPath = "" // degraded mode
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
+	} else {
+		// Open execution.log inside the run dir.
+		logFilePath := filepath.Join(runDirPath, "execution.log")
+		lf, openErr := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if openErr != nil {
+			slog.Warn("could not open execution.log; file logging disabled",
+				"path", logFilePath, "err", openErr)
+			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
+		} else {
+			logFile = lf
+			// Install dual-sink logger: console respects --log-level; file always DEBUG.
+			dualLogger := logging.NewDualSink(os.Stderr, logFile, logLevel)
+			slog.SetDefault(dualLogger)
+		}
+	}
+
+	// Ensure the log file is closed after the run (flush before writing report.json).
+	if logFile != nil {
+		defer logFile.Close()
+	}
+
+	// --- 3. Signal-safe context ---
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -146,7 +196,7 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		os.Exit(130)
 	}()
 
-	// --- 3. Wire concrete adapters ---
+	// --- 4. Wire concrete adapters ---
 
 	// Create per-run Docker network so Postgres and Maven containers share a DNS alias.
 	// The network cleanup is registered in orchestrator.Run via deps.NetworkCleanup (LIFO).
@@ -169,6 +219,11 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 	// For the container runner, this path is mounted at /m2 inside the Maven container.
 	mavenRepoCachePath := resolveEmbeddedMavenCache()
 
+	// Build the Maven output writer: routes Maven stdout/stderr to both the
+	// console (stderr) and execution.log. When logFile is nil (degraded mode),
+	// MavenWriter falls back to os.Stderr only.
+	mavenOut := logging.MavenWriter(os.Stderr, logFile)
+
 	uid, gid := hostUIDGID()
 	deps := orchestrator.Deps{
 		Preflight: preflight.New(nil),
@@ -184,16 +239,19 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		NetworkCleanup:     networkCleanup,
 		MavenRepoCachePath: mavenRepoCachePath,
 		Overlayer:          overlay.New(),
+		MavenOut:           mavenOut,
+		RunDir:             runDirPath,
+		KeepWorkspace:      cfg.KeepWorkspace,
 	}
 
-	// --- 4. Run orchestration ---
+	// --- 5. Run orchestration ---
 	rpt := orchestrator.Run(ctx, deps, cfg)
 
-	// --- 5. Console output (always) ---
+	// --- 6. Console output (always) ---
 	consoleRenderer := report.NewConsoleRenderer()
 	consoleRenderer.Render(rpt, os.Stdout)
 
-	// --- 6. JSON output (when requested) ---
+	// --- 7. JSON output (when requested via --output-format or --output-file) ---
 	if cfg.OutputFormat == "json" || cfg.OutputFile != "" {
 		jsonRenderer := report.NewJSONRenderer()
 		jsonBytes, err := jsonRenderer.Render(rpt)
@@ -212,17 +270,34 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		}
 	}
 
-	// --- 7. Exit code ---
+	// --- 8. Always write report.json to the run dir ---
+	// This is written regardless of --output-format so every run leaves a
+	// machine-readable record for post-mortem inspection.
+	if runDirPath != "" {
+		jsonRenderer := report.NewJSONRenderer()
+		jsonBytes, renderErr := jsonRenderer.Render(rpt)
+		if renderErr != nil {
+			slog.Warn("could not render report.json for run dir", "err", renderErr)
+		} else {
+			reportPath := filepath.Join(runDirPath, "report.json")
+			if err := os.WriteFile(reportPath, jsonBytes, 0o644); err != nil {
+				slog.Warn("could not write report.json to run dir", "path", reportPath, "err", err)
+			}
+		}
+	}
+
+	// --- 9. Exit code ---
 	return exitCode(rpt.Status)
 }
 
 // exitCode maps domain.Status to a UNIX exit code.
 //
 // Exit code contract:
-//   0  — PASSED
-//   1  — FAILED (validation failure — sync or rollback failed)
-//   2  — USAGE_ERROR or unknown (config/usage error: missing SQLInput, bad flags, etc.)
-//   130 — ABORTED (SIGINT / SIGTERM)
+//
+//	0  — PASSED
+//	1  — FAILED (validation failure — sync or rollback failed)
+//	2  — USAGE_ERROR or unknown (config/usage error: missing SQLInput, bad flags, etc.)
+//	130 — ABORTED (SIGINT / SIGTERM)
 func exitCode(s domain.Status) int {
 	switch s {
 	case domain.StatusPassed:
