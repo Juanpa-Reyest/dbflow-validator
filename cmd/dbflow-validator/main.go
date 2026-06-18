@@ -169,9 +169,11 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
 		} else {
 			logFile = lf
-			// Install dual-sink logger: console respects --log-level; file always DEBUG.
-			dualLogger := logging.NewDualSink(os.Stderr, logFile, logLevel)
-			slog.SetDefault(dualLogger)
+			// Install file-only logger: all slog output (verbose step trace) goes
+			// exclusively to execution.log. The console stays quiet — clean progress
+			// lines are emitted via deps.OnStep (fmt-based, not slog).
+			fileLogger := logging.NewFileSink(logFile)
+			slog.SetDefault(fileLogger)
 		}
 	}
 
@@ -217,10 +219,14 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 	// For the container runner, this path is mounted at /m2 inside the Maven container.
 	mavenRepoCachePath := resolveEmbeddedMavenCache()
 
-	// Build the Maven output writer: routes Maven stdout/stderr to both the
-	// console (stderr) and execution.log. When logFile is nil (degraded mode),
-	// MavenWriter falls back to os.Stderr only.
-	mavenOut := logging.MavenWriter(os.Stderr, logFile)
+	// Build the Maven output writer: routes Maven stdout/stderr exclusively to
+	// execution.log. The console stays quiet during a run; the OnStep callback
+	// prints the clean progress line when each Maven goal completes.
+	// When logFile is nil (degraded mode), Maven output is discarded.
+	var mavenOut io.Writer = io.Discard
+	if logFile != nil {
+		mavenOut = logFile
+	}
 
 	uid, gid := hostUIDGID()
 	deps := orchestrator.Deps{
@@ -241,6 +247,10 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		MavenOut:           mavenOut,
 		RunDir:             runDirPath,
 		KeepWorkspace:      cfg.KeepWorkspace,
+		// OnStep emits a clean one-line-per-step progress update to stdout.
+		// "starting" events print "  ▸ <name> …" and "done" events print the result.
+		// This keeps the console quiet (no slog logfmt) while still showing activity.
+		OnStep: consoleProgressPrinter(os.Stdout),
 	}
 
 	// --- 5. Run orchestration ---
@@ -389,4 +399,32 @@ func defaultCacheRoot() string {
 // host user, not root, so os.RemoveAll in cleanup succeeds without permission errors.
 func hostUIDGID() (int, int) {
 	return os.Getuid(), os.Getgid()
+}
+
+// consoleProgressPrinter returns an orchestrator.StepFunc that writes a clean
+// one-line-per-step progress indicator to w (typically os.Stdout).
+//
+// Format for starting events (Done=false):
+//
+//	  ▸ preflight …
+//
+// Format for completed events (Done=true):
+//
+//	  ▸ preflight … OK
+//	  ▸ clone … FAILED
+//
+// These are plain fmt lines, not slog logfmt, so the console stays free of
+// "time=… level=… msg=…" noise during a run.
+func consoleProgressPrinter(w io.Writer) func(orchestrator.StepEvent) {
+	return func(e orchestrator.StepEvent) {
+		if !e.Done {
+			fmt.Fprintf(w, "  ▸ %s …\n", e.Name)
+			return
+		}
+		result := "OK"
+		if e.Failed {
+			result = "FAILED"
+		}
+		fmt.Fprintf(w, "  ▸ %s … %s\n", e.Name, result)
+	}
 }

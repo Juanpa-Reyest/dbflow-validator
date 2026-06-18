@@ -118,13 +118,14 @@ func writeDetailBlocks(sb *strings.Builder, steps []domain.StepResult) {
 		sb.WriteString(prefix + fill + suffix + "\n")
 
 		// Trace lines with left rail.
+		// When a step produces no captured trace (e.g. preflight, engine-guard),
+		// the block body is left empty rather than showing a "(no trace captured)"
+		// placeholder — the summary table already covers the step outcome.
 		trace := strings.TrimRight(s.Trace, "\n")
 		if trace != "" {
 			for _, line := range strings.Split(trace, "\n") {
 				sb.WriteString(fmt.Sprintf("│  %s\n", line))
 			}
-		} else {
-			sb.WriteString("│  (no trace captured)\n")
 		}
 		// Error line in block when step failed.
 		if s.Status == domain.StepStatusFailed && s.Error != "" {

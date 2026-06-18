@@ -111,3 +111,48 @@ func TestMavenWriter_NilFileWriterFallsBackToConsole(t *testing.T) {
 		t.Errorf("console sink must receive output in degraded mode; got %q", consoleBuf.String())
 	}
 }
+
+// --- NewFileSink tests ---
+
+// TestNewFileSink_InfoGoesToFileOnly verifies that INFO messages go to the file only,
+// never to the console (which is intentionally silent for the quiet-console feature).
+func TestNewFileSink_InfoGoesToFileOnly(t *testing.T) {
+	var fileBuf bytes.Buffer
+	logger := logging.NewFileSink(&fileBuf)
+
+	logger.Info("hello file-only", "key", "value")
+
+	if !strings.Contains(fileBuf.String(), "hello file-only") {
+		t.Errorf("file sink missing INFO message; got %q", fileBuf.String())
+	}
+}
+
+// TestNewFileSink_DebugGoesToFile verifies that DEBUG messages also reach the file.
+func TestNewFileSink_DebugGoesToFile(t *testing.T) {
+	var fileBuf bytes.Buffer
+	logger := logging.NewFileSink(&fileBuf)
+
+	logger.Debug("debug-file-only")
+
+	if !strings.Contains(fileBuf.String(), "debug-file-only") {
+		t.Errorf("file sink must contain DEBUG message; got %q", fileBuf.String())
+	}
+}
+
+// TestNewFileSink_TokenAbsentFromFile verifies that redacted URLs are logged
+// but raw tokens do not appear in the file sink.
+func TestNewFileSink_TokenAbsentFromFile(t *testing.T) {
+	var fileBuf bytes.Buffer
+	logger := logging.NewFileSink(&fileBuf)
+
+	const rawToken = "supersecret99"
+	redactedURL := "https://***@github.com/org/repo.git"
+	logger.Info("cloning", "url", redactedURL)
+
+	if strings.Contains(fileBuf.String(), rawToken) {
+		t.Errorf("file sink must NOT contain raw token %q; got %q", rawToken, fileBuf.String())
+	}
+	if !strings.Contains(fileBuf.String(), "***@github.com") {
+		t.Errorf("file sink must contain redacted URL; got %q", fileBuf.String())
+	}
+}

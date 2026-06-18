@@ -85,6 +85,16 @@ func NewDualSink(consoleW, fileW io.Writer, consoleLevel slog.Level) *slog.Logge
 	})
 }
 
+// NewFileSink returns a *slog.Logger that writes ALL records (DEBUG and above)
+// to fileW using the enterprise readable format. The console receives nothing —
+// this is the intended production logger so that only the clean progress lines
+// (emitted directly via fmt) appear on the console, not raw slog logfmt.
+//
+// Use this in main.go instead of NewDualSink when the console must stay quiet.
+func NewFileSink(fileW io.Writer) *slog.Logger {
+	return slog.New(NewReadableHandler(fileW, slog.LevelDebug))
+}
+
 // MavenWriter returns an io.Writer that routes Maven container stdout/stderr
 // to both the console sink and the file sink verbatim.
 //

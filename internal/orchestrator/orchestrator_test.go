@@ -459,6 +459,82 @@ func TestOrchestrator_MavenOut_WiredToMaven(t *testing.T) {
 	}
 }
 
+// ---- OnStep progress callback tests ----
+
+// TestOrchestrator_OnStep_CalledForEachStep verifies that when deps.OnStep is set,
+// the callback is invoked at least once for each completed step.
+func TestOrchestrator_OnStep_CalledForEachStep(t *testing.T) {
+	deps := happyDeps(t)
+
+	var events []orchestrator.StepEvent
+	deps.OnStep = func(e orchestrator.StepEvent) {
+		events = append(events, e)
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Errorf("expected PASSED, got %v", report.Status)
+	}
+
+	// Must have at least one done event per step in the report.
+	doneCount := 0
+	for _, ev := range events {
+		if ev.Done {
+			doneCount++
+		}
+	}
+	if doneCount < len(report.Steps) {
+		t.Errorf("expected at least %d done events, got %d; events: %+v", len(report.Steps), doneCount, events)
+	}
+}
+
+// TestOrchestrator_OnStep_FailedStepEmitsDoneWithFailed verifies that when a step fails,
+// the callback is invoked with Done=true and Failed=true.
+func TestOrchestrator_OnStep_FailedStepEmitsDoneWithFailed(t *testing.T) {
+	deps := happyDeps(t)
+	deps.Preflight = &fakePreflight{err: errors.New("docker not found")}
+
+	var events []orchestrator.StepEvent
+	deps.OnStep = func(e orchestrator.StepEvent) {
+		events = append(events, e)
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusFailed {
+		t.Errorf("expected FAILED, got %v", report.Status)
+	}
+
+	// Find the done event for "preflight".
+	var found *orchestrator.StepEvent
+	for i := range events {
+		if events[i].Name == "preflight" && events[i].Done {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("no done event for 'preflight' step")
+	}
+	if !found.Failed {
+		t.Error("expected preflight done event to have Failed=true")
+	}
+}
+
+// TestOrchestrator_OnStep_NilIsNoOp verifies that when deps.OnStep is nil,
+// the orchestrator runs normally without panicking.
+func TestOrchestrator_OnStep_NilIsNoOp(t *testing.T) {
+	deps := happyDeps(t)
+	deps.OnStep = nil
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Errorf("expected PASSED with nil OnStep, got %v", report.Status)
+	}
+}
+
 // TestOrchestrator_MavenOut_NilFallsToDiscard verifies that when deps.MavenOut is nil,
 // Maven runs normally (falling back to io.Discard) — backward compatibility.
 func TestOrchestrator_MavenOut_NilFallsToDiscard(t *testing.T) {

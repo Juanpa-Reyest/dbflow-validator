@@ -19,6 +19,19 @@ import (
 	internalvendor "github.com/dbflow-validator/dbflow-validator/internal/vendor"
 )
 
+// StepEvent carries progress information for a single orchestration step.
+// It is delivered to Deps.OnStep both when a step starts (Done=false) and
+// when it completes (Done=true, Failed reflects the outcome).
+type StepEvent struct {
+	// Name is the step identifier (e.g. "preflight", "clone", "dbflow:sync").
+	Name string
+	// Done is false when the step is starting, true when it has finished.
+	Done bool
+	// Failed is true when Done=true and the step did not pass.
+	// Always false when Done=false.
+	Failed bool
+}
+
 // Deps holds all port implementations wired at application startup.
 type Deps struct {
 	Preflight  domain.PreflightChecker
@@ -70,6 +83,10 @@ type Deps struct {
 	// resolved identifiers). When nil, slog.Default() is used. Inject a capturing
 	// logger in tests to assert trace events without touching the global logger.
 	Logger *slog.Logger
+	// OnStep, when non-nil, is called twice for each step: once when the step
+	// starts (Done=false) and once when it completes (Done=true). Use this to
+	// emit clean per-step progress lines to the console without mixing slog output.
+	OnStep func(StepEvent)
 }
 
 // logger resolves the logger to use: the injected one from Deps.Logger, or slog.Default.
@@ -79,6 +96,14 @@ func logger(deps Deps) *slog.Logger {
 		return deps.Logger
 	}
 	return slog.Default()
+}
+
+// notify dispatches a StepEvent to deps.OnStep when it is non-nil.
+// It is a no-op when OnStep is nil, preserving backward compatibility.
+func notify(deps Deps, name string, done, failed bool) {
+	if deps.OnStep != nil {
+		deps.OnStep(StepEvent{Name: name, Done: done, Failed: failed})
+	}
 }
 
 // Run executes the full linear validation flow:
@@ -129,6 +154,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 			msg = fmt.Sprintf("%s: %v", msg, err)
 		}
 		log.Error("step failed", "step", name, "error", msg)
+		notify(deps, name, true, true)
 		steps = append(steps, domain.StepResult{
 			Name:   name,
 			Status: domain.StepStatusFailed,
@@ -145,6 +171,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 			msg = fmt.Sprintf("%s: %v", msg, err)
 		}
 		log.Warn("step usage-error", "step", name, "error", msg)
+		notify(deps, name, true, true)
 		steps = append(steps, domain.StepResult{
 			Name:   name,
 			Status: domain.StepStatusFailed,
@@ -156,6 +183,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 
 	pass := func(name string, duration time.Duration) {
 		log.Debug("step.done", "step", name, "duration_ms", duration.Milliseconds())
+		notify(deps, name, true, false)
 		steps = append(steps, domain.StepResult{
 			Name:       name,
 			Status:     domain.StepStatusPassed,
@@ -178,6 +206,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 
 	// --- Step 1: Preflight ---
 	log.Info("step.start", "step", "preflight")
+	notify(deps, "preflight", false, false)
 	t0 := time.Now()
 	if _, err := deps.Preflight.Check(ctx); err != nil {
 		return fail("preflight", "pre-flight host checks failed", err)
@@ -189,6 +218,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		"repo_url", cfg.RepoURL,
 		"branch", cfg.BaseBranch,
 	)
+	notify(deps, "clone", false, false)
 	t0 = time.Now()
 	cloneRoot, err := deps.Cloner.Clone(ctx, domain.CloneOptions{
 		RepoURL: cfg.RepoURL,
@@ -243,6 +273,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 
 	// --- Step 3: Engine guard ---
 	log.Info("step.start", "step", "engine-guard")
+	notify(deps, "engine-guard", false, false)
 	t0 = time.Now()
 	propsPath := cloneRoot + "/src/main/resources/db/liquibase.properties"
 	detectedEngine, err := deps.Engine.Detect(propsPath)
@@ -258,6 +289,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	// When deps.Overlayer is nil (legacy / test without overlay), skip this step.
 	if deps.Overlayer != nil {
 		log.Info("step.start", "step", "overlay", "sql_input_src", cfg.SQLInputPath)
+		notify(deps, "overlay", false, false)
 		// Collect the list of SQL files before copying — logged so engineers can see
 		// exactly which files were overlaid into the clone.
 		overlayFiles := collectSQLFileNames(cfg.SQLInputPath)
@@ -275,6 +307,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		"image", deps.DBProvider.Image(),
 		"network", deps.NetworkName,
 	)
+	notify(deps, "container-start", false, false)
 	t0 = time.Now()
 	containerProvider := deps.DBProvider.ContainerProvider()
 	coords, err := containerProvider.Start(ctx)
@@ -303,6 +336,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 
 	// --- Step 5: Readiness probe ---
 	log.Info("step.start", "step", "readiness-probe")
+	notify(deps, "readiness-probe", false, false)
 	t0 = time.Now()
 	dsn := deps.DBProvider.DSN(coords)
 	pingFn := func(pctx context.Context) error {
@@ -327,6 +361,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	// --- Step 6a: Schema extraction + lb_<schema> user + GRANT-target roles ---
 	// Extract the target schema name from the archetype DDL to derive the
 	// ephemeral connection user (lb_<schema>) and auto-create GRANT-target roles.
+	notify(deps, "schema-setup", false, false)
 	t0 = time.Now()
 	adminDSN := deps.DBProvider.DSN(coords)
 
@@ -399,6 +434,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	// Oracle/MySQL/Snowflake drivers but NOT PostgreSQL. The plugin classloader
 	// is isolated; the driver must be declared inside <plugin><dependencies>.
 	log.Debug("step.start", "step", "pom-driver-inject")
+	notify(deps, "pom-driver-inject", false, false)
 	t0 = time.Now()
 	clonedPomPath := cloneRoot + "/pom.xml"
 	if err := maven.InjectDriverDependency(clonedPomPath); err != nil {
@@ -414,6 +450,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		"db_user", lbCoords.User,
 		"db_name", lbCoords.DBName,
 	)
+	notify(deps, "properties-patch", false, false)
 	t0 = time.Now()
 	if err := deps.Patcher.Patch(propsPath, lbCoords); err != nil {
 		return fail("properties-patch", "failed to patch liquibase.properties", err)
@@ -425,6 +462,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	// mirroring the real pipeline's validate → validate-ephemeral order.
 	// A nil validator is treated as the no-op default (always passes).
 	log.Debug("step.start", "step", "pre-sync-validate")
+	notify(deps, "pre-sync-validate", false, false)
 	t0 = time.Now()
 	preSyncValidator := deps.PreSyncValidator
 	if preSyncValidator == nil {
@@ -436,8 +474,8 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	pass("pre-sync-validate", time.Since(t0))
 
 	// Resolve the Maven output writer: use MavenOut if provided, otherwise discard.
-	// MavenOut is wired in main.go to logging.MavenWriter(os.Stderr, logFile) so
-	// Maven stdout/stderr flows to both the live console and execution.log.
+	// MavenOut is wired in main.go to the log file only; Maven verbose output
+	// goes to execution.log rather than the console, which stays quiet.
 	mavenOut := deps.MavenOut
 	if mavenOut == nil {
 		mavenOut = io.Discard
@@ -450,6 +488,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		"mvn_cmd", buildRedactedMvnCmd(maven.GoalSync, syncParamList),
 		"network", deps.NetworkName,
 	)
+	notify(deps, maven.GoalSync, false, false)
 	t0 = time.Now()
 	syncResult, err := deps.Maven.Run(ctx, cloneRoot, maven.GoalSync, syncParamList, mavenOut)
 	if err != nil {
@@ -458,6 +497,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	syncResult.Duration = time.Since(t0)
 	syncResult.DurationMs = syncResult.Duration.Milliseconds()
 	log.Debug("step.done", "step", maven.GoalSync, "duration_ms", syncResult.DurationMs, "status", syncResult.Status)
+	notify(deps, maven.GoalSync, true, syncResult.Status != domain.StepStatusPassed)
 	steps = append(steps, syncResult)
 	if syncResult.Status != domain.StepStatusPassed {
 		overallStatus = domain.StatusFailed
@@ -466,6 +506,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 
 	// --- Step 8: First-tag resolution ---
 	log.Info("step.start", "step", "first-tag")
+	notify(deps, "first-tag", false, false)
 	t0 = time.Now()
 	firstTag, err := deps.Tags.FirstTag(cloneRoot)
 	if err != nil {
@@ -482,6 +523,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		"mvn_cmd", buildRedactedMvnCmd(maven.GoalRollback, rollbackParamList),
 		"network", deps.NetworkName,
 	)
+	notify(deps, maven.GoalRollback, false, false)
 	t0 = time.Now()
 	rollbackResult, err := deps.Maven.Run(ctx, cloneRoot, maven.GoalRollback, rollbackParamList, mavenOut)
 	if err != nil {
@@ -490,6 +532,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	rollbackResult.Duration = time.Since(t0)
 	rollbackResult.DurationMs = rollbackResult.Duration.Milliseconds()
 	log.Debug("step.done", "step", maven.GoalRollback, "duration_ms", rollbackResult.DurationMs, "status", rollbackResult.Status)
+	notify(deps, maven.GoalRollback, true, rollbackResult.Status != domain.StepStatusPassed)
 	steps = append(steps, rollbackResult)
 	if rollbackResult.Status != domain.StepStatusPassed {
 		overallStatus = domain.StatusFailed

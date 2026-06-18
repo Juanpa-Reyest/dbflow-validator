@@ -232,6 +232,29 @@ func TestExecLog_NoTokenLeakage(t *testing.T) {
 	}
 }
 
+// TestExecLog_NoTraceCapture_Omitted verifies that when a step has no trace and no error,
+// the block body does NOT contain the literal "(no trace captured)" string.
+// Instead the block is rendered cleanly without a filler line.
+func TestExecLog_NoTraceCapture_Omitted(t *testing.T) {
+	rpt := domain.RunReport{
+		Status:     domain.StatusPassed,
+		RepoURL:    "https://example.com/repo.git",
+		BaseBranch: "integration",
+		Steps: []domain.StepResult{
+			// preflight step with NO trace (simulates steps like preflight / engine-guard)
+			{Name: "preflight", Status: domain.StepStatusPassed, DurationMs: 10,
+				Duration: 10 * time.Millisecond, Trace: ""},
+		},
+		TotalDurMs: 10,
+	}
+
+	got := report.RenderExecLog(rpt, "run-id", "v0.1", "")
+
+	if strings.Contains(got, "(no trace captured)") {
+		t.Error("execlog must NOT contain '(no trace captured)' literal; use a clean empty block body")
+	}
+}
+
 // TestExecLog_TableBeforeBlocks verifies summary table appears before detail blocks.
 func TestExecLog_TableBeforeBlocks(t *testing.T) {
 	rpt := fixedExecLogPassedReport()
