@@ -17,6 +17,7 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/liquibase"
 	"github.com/dbflow-validator/dbflow-validator/internal/maven"
 	"github.com/dbflow-validator/dbflow-validator/internal/orchestrator"
+	"github.com/dbflow-validator/dbflow-validator/internal/overlay"
 	"github.com/dbflow-validator/dbflow-validator/internal/preflight"
 )
 
@@ -45,35 +46,37 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	}
 
 	// Copy the archetype to a temp dir so the flow can mutate liquibase.properties
-	// and populate SQLInput without touching the read-only source.
+	// without touching the read-only source. The clone's SQLInput is intentionally
+	// left empty — the overlay step will populate it from fixtureLocalSQLInput below.
 	tmpArchetype := t.TempDir()
 	t.Logf("copying archetype to %s", tmpArchetype)
 	if err := copyDir(archetypeSrc, tmpArchetype); err != nil {
 		t.Fatalf("copy archetype: %v", err)
 	}
 
-	// Populate SQLInput with a valid-named test SQL file.
+	// Create a SEPARATE fixture local SQLInput directory that simulates the developer's
+	// local working copy. The overlay step will copy these files into the clone's
+	// src/main/resources/SQLInput/ before sync.
+	//
 	// The plugin validates file names against: (N/U)(4 digits)_TYPE_DESCRIPTION.sql
 	// where TYPE ∈ {TA, SP, FN, PA, IX, SE, TS, PK, FK, TY, DML, GRT, USR, TBS, INS, DEL, UPD}.
-	// A TA (table) file that doesn't match the "allowed action types" causes the plugin
-	// to fall back to the full Liquibase XML changelog update — which is the correct
-	// behavior for the initial validation of a new ephemeral DB.
-	// The lb_scgolfcore schema is created by the orchestrator's schema-setup step, so
-	// the table creation is guaranteed to land in the right schema.
-	sqlInputDir := tmpArchetype + "/src/main/resources/SQLInput"
+	// A TA (table) file causes the plugin to fall back to the full Liquibase XML changelog
+	// update — correct behavior for initial validation of a new ephemeral DB.
+	// The lb_scgolfcore schema is created by the orchestrator's schema-setup step.
+	fixtureLocalSQLInput := t.TempDir()
 	testSQL := `CREATE TABLE IF NOT EXISTS lb_scgolfcore.validator_run (
   id SERIAL PRIMARY KEY,
   run_tag TEXT NOT NULL,
   created_at TIMESTAMP DEFAULT now()
 );`
 	testSQLRB := `DROP TABLE IF EXISTS lb_scgolfcore.validator_run;`
-	if err := os.WriteFile(sqlInputDir+"/N0001_TA_VALIDATOR_RUN.sql", []byte(testSQL), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(fixtureLocalSQLInput, "N0001_TA_VALIDATOR_RUN.sql"), []byte(testSQL), 0o644); err != nil {
 		t.Fatalf("write SQLInput test file: %v", err)
 	}
-	if err := os.WriteFile(sqlInputDir+"/N0001_TA_VALIDATOR_RUN_RB.sql", []byte(testSQLRB), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(fixtureLocalSQLInput, "N0001_TA_VALIDATOR_RUN_RB.sql"), []byte(testSQLRB), 0o644); err != nil {
 		t.Fatalf("write SQLInput rollback file: %v", err)
 	}
-	t.Log("SQLInput populated with N0001_TA_VALIDATOR_RUN.sql")
+	t.Logf("fixture local SQLInput prepared at %s with N0001_TA_VALIDATOR_RUN.sql", fixtureLocalSQLInput)
 
 	// Create a per-run Docker network so Postgres and Maven containers share alias resolution.
 	ctx := context.Background()
@@ -129,12 +132,16 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 		Maven:              containerRunner,
 		NetworkCleanup:     networkCleanup,
 		MavenRepoCachePath: mavenRepoCachePath,
+		// Wire the real Overlayer so fixture SQLInput is copied into the clone's
+		// src/main/resources/SQLInput/ before sync.
+		Overlayer: overlay.New(),
 	}
 
 	cfg := config.Config{
-		RepoURL:    "local://db-artifacts-scgolfcore",
-		BaseBranch: "integracion",
-		Token:      domain.NewSecret(""),
+		RepoURL:      "local://db-artifacts-scgolfcore",
+		BaseBranch:   "integration",
+		SQLInputPath: fixtureLocalSQLInput,
+		Token:        domain.NewSecret(""),
 	}
 
 	t.Log("Starting end-to-end validation run...")
@@ -154,6 +161,43 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 
 	if rpt.Status != domain.StatusPassed {
 		t.Errorf("expected PASSED, got %v", rpt.Status)
+	}
+
+	// Assert that the overlay step is present, PASSED, and positioned correctly.
+	engineGuardIdx := -1
+	overlayIdx := -1
+	containerStartIdx := -1
+	for i, s := range rpt.Steps {
+		switch s.Name {
+		case "engine-guard":
+			engineGuardIdx = i
+		case "overlay":
+			overlayIdx = i
+		case "container-start":
+			containerStartIdx = i
+		}
+	}
+	if overlayIdx == -1 {
+		t.Error("expected 'overlay' step in report, not found")
+	} else {
+		if rpt.Steps[overlayIdx].Status != domain.StepStatusPassed {
+			t.Errorf("overlay step: expected PASSED, got %v (error: %s)",
+				rpt.Steps[overlayIdx].Status, rpt.Steps[overlayIdx].Error)
+		}
+		if engineGuardIdx != -1 && overlayIdx <= engineGuardIdx {
+			t.Errorf("overlay (%d) must come after engine-guard (%d)", overlayIdx, engineGuardIdx)
+		}
+		if containerStartIdx != -1 && overlayIdx >= containerStartIdx {
+			t.Errorf("overlay (%d) must come before container-start (%d)", overlayIdx, containerStartIdx)
+		}
+	}
+
+	// Assert that the source fixture is never mutated (fixture dir must still have its files).
+	// Note: the clone's SQLInput is cleaned up by orchestrator.Run's deferred cleanup,
+	// so we verify the overlay outcome via the PASSED step status above rather than
+	// checking the post-run file system state of the clone directory.
+	if _, err := os.Stat(filepath.Join(fixtureLocalSQLInput, "N0001_TA_VALIDATOR_RUN.sql")); err != nil {
+		t.Errorf("fixture source file should still exist after overlay (source must never be mutated): %v", err)
 	}
 }
 
