@@ -165,9 +165,33 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	if err != nil {
 		return fail("clone", "git clone failed", err)
 	}
-	// Register cleanup for temp clone dir.
+	// Register status-conditional cleanup for the ephemeral clone directory.
+	//
+	// The closure captures &overallStatus and reads it at run time (inside deferred
+	// reg.RunAll()), which executes AFTER Run() has set overallStatus to its terminal
+	// value. This is the core of the status-conditional workspace retention:
+	//
+	//   - PASSED and !KeepWorkspace → os.RemoveAll(cloneRoot) — normal success cleanup
+	//   - Any other outcome (FAILED, ABORTED, USAGE_ERROR) OR KeepWorkspace=true →
+	//     MoveWorkspace(cloneRoot, <runDir>/workspace/) — retain the clone for debugging
+	//
+	// When deps.RunDir is empty (run-dir creation failed / degraded mode), fall back
+	// to unconditional removal to avoid leaking temp dirs.
+	finalStatus := &overallStatus
+	runDir := deps.RunDir
+	keepWorkspace := deps.KeepWorkspace
 	reg.Register(func() error {
-		return os.RemoveAll(cloneRoot)
+		// Remove on success (unless keep-workspace requested) or when runDir is empty.
+		if *finalStatus == domain.StatusPassed && !keepWorkspace {
+			return os.RemoveAll(cloneRoot)
+		}
+		if runDir == "" {
+			// Degraded mode: run-dir not available, fall back to removal.
+			slog.Warn("run dir unavailable; removing clone dir (cannot retain workspace)", "cloneRoot", cloneRoot)
+			return os.RemoveAll(cloneRoot)
+		}
+		// Move the clone into <runDir>/workspace/ for post-mortem inspection.
+		return MoveWorkspace(cloneRoot, filepath.Join(runDir, "workspace"))
 	})
 	pass("clone", time.Since(t0))
 
