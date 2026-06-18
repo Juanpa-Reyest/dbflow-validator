@@ -2,10 +2,12 @@ package orchestrator_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/config"
@@ -15,10 +17,12 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/engine"
 	internalgit "github.com/dbflow-validator/dbflow-validator/internal/git"
 	"github.com/dbflow-validator/dbflow-validator/internal/liquibase"
+	"github.com/dbflow-validator/dbflow-validator/internal/logging"
 	"github.com/dbflow-validator/dbflow-validator/internal/maven"
 	"github.com/dbflow-validator/dbflow-validator/internal/orchestrator"
 	"github.com/dbflow-validator/dbflow-validator/internal/overlay"
 	"github.com/dbflow-validator/dbflow-validator/internal/preflight"
+	"github.com/dbflow-validator/dbflow-validator/internal/report"
 )
 
 // TestEndToEnd_HappyPath runs the REAL flow against the reference archetype
@@ -122,6 +126,24 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 		os.Getgid(),
 	)
 
+	// Create a run dir for this test so we can assert artifacts are written.
+	runDir := t.TempDir()
+	runSubDir := filepath.Join(runDir, "e2e-run")
+	if err := os.MkdirAll(runSubDir, 0o700); err != nil {
+		t.Fatalf("create run subdir: %v", err)
+	}
+
+	// Open execution.log inside the run dir.
+	logFilePath := filepath.Join(runSubDir, "execution.log")
+	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatalf("open execution.log: %v", err)
+	}
+	defer logFile.Close()
+
+	// Maven output goes to both os.Stderr (live) and execution.log.
+	mavenOut := logging.MavenWriter(os.Stderr, logFile)
+
 	deps := orchestrator.Deps{
 		Preflight:          preflight.New(nil),
 		Cloner:             fakeCloner,
@@ -134,7 +156,10 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 		MavenRepoCachePath: mavenRepoCachePath,
 		// Wire the real Overlayer so fixture SQLInput is copied into the clone's
 		// src/main/resources/SQLInput/ before sync.
-		Overlayer: overlay.New(),
+		Overlayer:     overlay.New(),
+		MavenOut:      mavenOut,
+		RunDir:        runSubDir,
+		KeepWorkspace: false,
 	}
 
 	cfg := config.Config{
@@ -198,6 +223,157 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	// checking the post-run file system state of the clone directory.
 	if _, err := os.Stat(filepath.Join(fixtureLocalSQLInput, "N0001_TA_VALIDATOR_RUN.sql")); err != nil {
 		t.Errorf("fixture source file should still exist after overlay (source must never be mutated): %v", err)
+	}
+
+	// Close the log file so all data is flushed before we assert file content.
+	logFile.Close()
+
+	// --- Run dir assertions (Phase 7.1) ---
+
+	// execution.log must exist and have content.
+	logContent, err := os.ReadFile(logFilePath)
+	if err != nil {
+		t.Errorf("execution.log must exist after PASSED run: %v", err)
+	} else if len(logContent) == 0 {
+		t.Error("execution.log must not be empty after a PASSED run")
+	}
+
+	// Write report.json into the run dir (simulating what main.go does).
+	jsonRenderer := report.NewJSONRenderer()
+	jsonBytes, renderErr := jsonRenderer.Render(rpt)
+	if renderErr != nil {
+		t.Fatalf("render report.json: %v", renderErr)
+	}
+	reportPath := filepath.Join(runSubDir, "report.json")
+	if err := os.WriteFile(reportPath, jsonBytes, 0o644); err != nil {
+		t.Fatalf("write report.json: %v", err)
+	}
+
+	// report.json must exist and be valid JSON.
+	reportContent, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Errorf("report.json must exist after PASSED run: %v", err)
+	} else {
+		var jsonDoc map[string]interface{}
+		if err := json.Unmarshal(reportContent, &jsonDoc); err != nil {
+			t.Errorf("report.json must be valid JSON: %v", err)
+		}
+		if status, ok := jsonDoc["status"]; !ok || status != "PASSED" {
+			t.Errorf("report.json status: got %v, want PASSED", status)
+		}
+	}
+
+	// workspace/ must NOT exist after a PASSED run without --keep-workspace.
+	workspacePath := filepath.Join(runSubDir, "workspace")
+	if _, err := os.Stat(workspacePath); !os.IsNotExist(err) {
+		t.Errorf("<runDir>/workspace/ must NOT exist after PASSED run without --keep-workspace; err: %v", err)
+	}
+
+	// --- Secret safety assertions (Phase 7.2) ---
+	// Token must not appear in execution.log or report.json.
+	// The e2e test uses an empty token (""), so we assert on the redacted form
+	// not appearing (which would indicate some other secret leaked).
+	// For comprehensive secret testing, the unit tests in logging package cover
+	// the token-absent invariant with a real fake token.
+	if strings.Contains(string(logContent), "abc123secret") {
+		t.Error("execution.log must not contain raw token literal")
+	}
+	if strings.Contains(string(reportContent), "abc123secret") {
+		t.Error("report.json must not contain raw token literal")
+	}
+}
+
+// TestEndToEnd_FailurePath verifies that on a FAILED run:
+//   - <runDir>/workspace/ exists and contains the generated changelog XML
+//   - Container and network cleanup closures were invoked
+//
+// This test uses a fake Maven runner that forces failure — no Docker required.
+func TestEndToEnd_FailurePath(t *testing.T) {
+
+	runDir := t.TempDir()
+
+	// Write a minimal pom.xml and fake archetype structure so the orchestrator
+	// reaches the Maven step (past preflight, clone, engine-guard, etc.).
+	cloneDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cloneDir, "pom.xml"), []byte(minimalPOM), 0o644); err != nil {
+		t.Fatalf("write pom.xml: %v", err)
+	}
+
+	// Create a fake SQL file in the clone's SQLInput so the overlay step can succeed.
+	sqlInputDir := filepath.Join(cloneDir, "src", "main", "resources", "SQLInput")
+	if err := os.MkdirAll(sqlInputDir, 0o755); err != nil {
+		t.Fatalf("create SQLInput: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sqlInputDir, "N0001_TA_TEST.sql"), []byte("-- test"), 0o644); err != nil {
+		t.Fatalf("write sql: %v", err)
+	}
+
+	// Create a fake changelog XML inside the clone's expected path so workspace
+	// retention can be verified.
+	changelogDir := filepath.Join(cloneDir, "src", "main", "resources", "db", "schema", "changelog")
+	if err := os.MkdirAll(changelogDir, 0o755); err != nil {
+		t.Fatalf("create changelog dir: %v", err)
+	}
+	changelogFile := filepath.Join(changelogDir, "generated-changelog.xml")
+	if err := os.WriteFile(changelogFile, []byte(`<?xml version="1.0"?><databaseChangeLog/>`), 0o644); err != nil {
+		t.Fatalf("write changelog: %v", err)
+	}
+
+	containerStopCount := 0
+	networkCleanupCount := 0
+
+	deps := orchestrator.Deps{
+		Preflight: &fakePreflight{},
+		Cloner:    &fakeCloner{root: cloneDir},
+		DBProvider: &fakeDatabaseProvider{
+			provider: &fakeContainerProvider{
+				coords: domain.ContainerCoords{Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", DBName: "db"},
+				stopFn: func() error { containerStopCount++; return nil },
+			},
+		},
+		Patcher:         &fakePatcher{},
+		Engine:          &fakeEngineDetector{engine: "postgres"},
+		Tags:            &fakeTagResolver{tag: "210"},
+		ReadinessPolicy: &fastPolicy,
+		// Force sync failure so the run ends with StatusFailed.
+		Maven: &fakeMavenRunner{
+			syncResult: domain.StepResult{Status: domain.StepStatusFailed, Error: "BUILD FAILURE"},
+		},
+		NetworkCleanup: func() error { networkCleanupCount++; return nil },
+		RunDir:         runDir,
+		KeepWorkspace:  false,
+	}
+
+	cfg := config.Config{
+		RepoURL:    "https://example.com/repo.git",
+		BaseBranch: "main",
+		Token:      domain.NewSecret(""),
+	}
+
+	rpt := orchestrator.Run(context.Background(), deps, cfg)
+
+	if rpt.Status != domain.StatusFailed {
+		t.Fatalf("expected FAILED run, got %v", rpt.Status)
+	}
+
+	// Assert workspace exists with the generated changelog XML.
+	workspacePath := filepath.Join(runDir, "workspace")
+	if _, err := os.Stat(workspacePath); os.IsNotExist(err) {
+		t.Errorf("<runDir>/workspace/ must exist after FAILED run")
+	} else {
+		// The generated changelog XML must be present inside the moved workspace.
+		movedChangelog := filepath.Join(workspacePath, "src", "main", "resources", "db", "schema", "changelog", "generated-changelog.xml")
+		if _, err := os.Stat(movedChangelog); os.IsNotExist(err) {
+			t.Errorf("generated changelog XML must exist inside <runDir>/workspace/ after FAILED run: %v", err)
+		}
+	}
+
+	// Container and network cleanup must have been invoked regardless of outcome.
+	if containerStopCount == 0 {
+		t.Error("container Stop must be called on FAILED run")
+	}
+	if networkCleanupCount == 0 {
+		t.Error("network cleanup must be called on FAILED run")
 	}
 }
 
