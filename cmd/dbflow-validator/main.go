@@ -237,6 +237,7 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		Tags:               &liquibase.ChangelogResolver{},
 		Maven:              maven.NewContainerRunner(maven.DefaultImage, networkName, mavenRepoCachePath, uid, gid),
 		NetworkCleanup:     networkCleanup,
+		NetworkName:        networkName,
 		MavenRepoCachePath: mavenRepoCachePath,
 		Overlayer:          overlay.New(),
 		MavenOut:           mavenOut,

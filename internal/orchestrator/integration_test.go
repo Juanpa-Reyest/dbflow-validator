@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -144,6 +145,11 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	// Maven output goes to both os.Stderr (live) and execution.log.
 	mavenOut := logging.MavenWriter(os.Stderr, logFile)
 
+	// Build a dual-sink logger so orchestrator trace events also land in execution.log.
+	// The file sink is always at DEBUG; the console sink (os.Stderr) is at Info so
+	// step.start milestones appear live during the test without flooding the terminal.
+	dualLogger := logging.NewDualSink(os.Stderr, logFile, slog.LevelInfo)
+
 	deps := orchestrator.Deps{
 		Preflight:          preflight.New(nil),
 		Cloner:             fakeCloner,
@@ -153,6 +159,7 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 		Tags:               &liquibase.ChangelogResolver{},
 		Maven:              containerRunner,
 		NetworkCleanup:     networkCleanup,
+		NetworkName:        networkName,
 		MavenRepoCachePath: mavenRepoCachePath,
 		// Wire the real Overlayer so fixture SQLInput is copied into the clone's
 		// src/main/resources/SQLInput/ before sync.
@@ -160,6 +167,8 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 		MavenOut:      mavenOut,
 		RunDir:        runSubDir,
 		KeepWorkspace: false,
+		// Inject the dual-sink logger so orchestrator trace events land in execution.log.
+		Logger: dualLogger,
 	}
 
 	cfg := config.Config{
@@ -269,13 +278,49 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 		t.Errorf("<runDir>/workspace/ must NOT exist after PASSED run without --keep-workspace; err: %v", err)
 	}
 
+	// --- Verbose trace assertions (WARNING-1 remediation) ---
+	// execution.log must contain structured trace lines from the orchestrator.
+	logStr := string(logContent)
+
+	// Step boundaries must appear in execution.log.
+	for _, wantStep := range []string{"preflight", "clone", "engine-guard", "container-start", "dbflow:sync", "first-tag", "dbflow:rollback"} {
+		if !strings.Contains(logStr, "step.start") || !strings.Contains(logStr, wantStep) {
+			t.Errorf("execution.log must contain step.start for %q; snippet:\n%s", wantStep, logStr[:min(500, len(logStr))])
+		}
+	}
+
+	// The redacted mvn command must appear.
+	if !strings.Contains(logStr, "mvn_cmd") {
+		t.Errorf("execution.log must contain 'mvn_cmd' trace attribute; snippet:\n%s", logStr[:min(500, len(logStr))])
+	}
+
+	// The Docker network name must appear.
+	if !strings.Contains(logStr, "network=") {
+		t.Errorf("execution.log must contain 'network=' trace attribute")
+	}
+
+	// The resolved first-tag must appear.
+	if !strings.Contains(logStr, "first-tag resolved") || !strings.Contains(logStr, "tag=") {
+		t.Errorf("execution.log must contain first-tag resolved with tag= attribute; snippet:\n%s", logStr[:min(500, len(logStr))])
+	}
+
+	// The overlay SQL file names must appear (at least one).
+	if !strings.Contains(logStr, "N0001_TA_VALIDATOR_RUN.sql") {
+		t.Errorf("execution.log must contain overlay file name 'N0001_TA_VALIDATOR_RUN.sql'; snippet:\n%s", logStr[:min(500, len(logStr))])
+	}
+
+	// duration_ms must appear in at least one step.done line.
+	if !strings.Contains(logStr, "duration_ms") {
+		t.Errorf("execution.log must contain 'duration_ms' in step.done lines")
+	}
+
 	// --- Secret safety assertions (Phase 7.2) ---
 	// Token must not appear in execution.log or report.json.
 	// The e2e test uses an empty token (""), so we assert on the redacted form
 	// not appearing (which would indicate some other secret leaked).
 	// For comprehensive secret testing, the unit tests in logging package cover
 	// the token-absent invariant with a real fake token.
-	if strings.Contains(string(logContent), "abc123secret") {
+	if strings.Contains(logStr, "abc123secret") {
 		t.Error("execution.log must not contain raw token literal")
 	}
 	if strings.Contains(string(reportContent), "abc123secret") {

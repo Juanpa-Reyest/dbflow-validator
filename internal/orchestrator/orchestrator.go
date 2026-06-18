@@ -33,6 +33,10 @@ type Deps struct {
 	// Docker network is torn down LAST (after both containers are stopped).
 	// Leave nil when no Docker network is in use (e.g. unit tests).
 	NetworkCleanup func() error
+	// NetworkName is the Docker network name used to connect Postgres and Maven
+	// containers. Included in trace logs so engineers can correlate container IDs
+	// with the network. Leave empty when no Docker network is in use.
+	NetworkName string
 	// MavenRepoCachePath is the host path to the vendored Maven repository (mvn-vendor/repository).
 	// When non-empty, the orchestrator writes settings.xml into the clone dir so the
 	// ContainerRunner can pick it up at /work/settings.xml inside the Maven container.
@@ -62,6 +66,19 @@ type Deps struct {
 	// src/main/resources/SQLInput/ directory before sync. Leave nil to skip the
 	// overlay step (backward-compatible with tests that do not wire an overlayer).
 	Overlayer domain.Overlayer
+	// Logger is the structured logger used for trace output (step boundaries, timing,
+	// resolved identifiers). When nil, slog.Default() is used. Inject a capturing
+	// logger in tests to assert trace events without touching the global logger.
+	Logger *slog.Logger
+}
+
+// logger resolves the logger to use: the injected one from Deps.Logger, or slog.Default.
+// This allows tests to inject a capturing logger without touching the global default.
+func logger(deps Deps) *slog.Logger {
+	if deps.Logger != nil {
+		return deps.Logger
+	}
+	return slog.Default()
 }
 
 // Run executes the full linear validation flow:
@@ -79,14 +96,23 @@ type Deps struct {
 // Cleanup (container stop + temp dir removal) is registered eagerly and runs
 // on ALL exit paths via deferred registry.RunAll().
 func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
+	log := logger(deps)
 	started := time.Now()
 	reg := NewCleanupRegistry()
 	defer func() {
 		errs := reg.RunAll()
 		for _, e := range errs {
-			slog.Warn("cleanup error", "err", e)
+			log.Warn("cleanup error", "err", e)
 		}
 	}()
+
+	// Emit the run preamble at Info so it appears on the console at the default log level.
+	log.Info("run started",
+		"repo_url", cfg.RepoURL,
+		"base_branch", cfg.BaseBranch,
+		"sql_input", cfg.SQLInputPath,
+		"network", deps.NetworkName,
+	)
 
 	// Register Docker network cleanup FIRST (LIFO = runs LAST).
 	// The network must be torn down after both the Postgres and Maven containers
@@ -102,6 +128,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		if err != nil {
 			msg = fmt.Sprintf("%s: %v", msg, err)
 		}
+		log.Error("step failed", "step", name, "error", msg)
 		steps = append(steps, domain.StepResult{
 			Name:   name,
 			Status: domain.StepStatusFailed,
@@ -117,6 +144,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		if err != nil {
 			msg = fmt.Sprintf("%s: %v", msg, err)
 		}
+		log.Warn("step usage-error", "step", name, "error", msg)
 		steps = append(steps, domain.StepResult{
 			Name:   name,
 			Status: domain.StepStatusFailed,
@@ -127,6 +155,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}
 
 	pass := func(name string, duration time.Duration) {
+		log.Debug("step.done", "step", name, "duration_ms", duration.Milliseconds())
 		steps = append(steps, domain.StepResult{
 			Name:       name,
 			Status:     domain.StepStatusPassed,
@@ -148,6 +177,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}
 
 	// --- Step 1: Preflight ---
+	log.Info("step.start", "step", "preflight")
 	t0 := time.Now()
 	if _, err := deps.Preflight.Check(ctx); err != nil {
 		return fail("preflight", "pre-flight host checks failed", err)
@@ -155,6 +185,10 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	pass("preflight", time.Since(t0))
 
 	// --- Step 2: Clone ---
+	log.Info("step.start", "step", "clone",
+		"repo_url", cfg.RepoURL,
+		"branch", cfg.BaseBranch,
+	)
 	t0 = time.Now()
 	cloneRoot, err := deps.Cloner.Clone(ctx, domain.CloneOptions{
 		RepoURL: cfg.RepoURL,
@@ -165,6 +199,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	if err != nil {
 		return fail("clone", "git clone failed", err)
 	}
+	log.Debug("clone destination", "clone_root", cloneRoot)
 	// Register status-conditional cleanup for the ephemeral clone directory.
 	//
 	// The closure captures &overallStatus and reads it at run time (inside deferred
@@ -207,12 +242,14 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}
 
 	// --- Step 3: Engine guard ---
+	log.Info("step.start", "step", "engine-guard")
 	t0 = time.Now()
 	propsPath := cloneRoot + "/src/main/resources/db/liquibase.properties"
-	_, err = deps.Engine.Detect(propsPath)
+	detectedEngine, err := deps.Engine.Detect(propsPath)
 	if err != nil {
 		return fail("engine-guard", "engine detection failed", err)
 	}
+	log.Debug("engine resolved", "engine", detectedEngine)
 	pass("engine-guard", time.Since(t0))
 
 	// --- Step 3b: SQLInput overlay ---
@@ -220,6 +257,11 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	// src/main/resources/SQLInput/ directory before starting any container or Maven.
 	// When deps.Overlayer is nil (legacy / test without overlay), skip this step.
 	if deps.Overlayer != nil {
+		log.Info("step.start", "step", "overlay", "sql_input_src", cfg.SQLInputPath)
+		// Collect the list of SQL files before copying — logged so engineers can see
+		// exactly which files were overlaid into the clone.
+		overlayFiles := collectSQLFileNames(cfg.SQLInputPath)
+		log.Debug("overlay file list", "files", strings.Join(overlayFiles, ", "), "count", len(overlayFiles))
 		t0 = time.Now()
 		destSQLInput := cloneRoot + "/src/main/resources/SQLInput"
 		if _, err := deps.Overlayer.Apply(cfg.SQLInputPath, destSQLInput); err != nil {
@@ -229,6 +271,10 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}
 
 	// --- Step 4: Start container ---
+	log.Info("step.start", "step", "container-start",
+		"image", deps.DBProvider.Image(),
+		"network", deps.NetworkName,
+	)
 	t0 = time.Now()
 	containerProvider := deps.DBProvider.ContainerProvider()
 	coords, err := containerProvider.Start(ctx)
@@ -239,9 +285,24 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	reg.Register(func() error {
 		return containerProvider.Stop(context.Background())
 	})
+	// Log the connection alias (no credentials) so engineers can see which network
+	// alias the Maven container will use to reach Postgres.
+	pgAlias := coords.AliasHost
+	if pgAlias == "" {
+		pgAlias = coords.Host
+	}
+	log.Debug("postgres container up",
+		"host", coords.Host,
+		"port", coords.Port,
+		"alias_host", pgAlias,
+		"alias_port", coords.AliasPort,
+		"db", coords.DBName,
+		"user", coords.User,
+	)
 	pass("container-start", time.Since(t0))
 
 	// --- Step 5: Readiness probe ---
+	log.Info("step.start", "step", "readiness-probe")
 	t0 = time.Now()
 	dsn := deps.DBProvider.DSN(coords)
 	pingFn := func(pctx context.Context) error {
@@ -337,6 +398,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	// The relational-db-release-manager-plugin is a shaded jar that bundles
 	// Oracle/MySQL/Snowflake drivers but NOT PostgreSQL. The plugin classloader
 	// is isolated; the driver must be declared inside <plugin><dependencies>.
+	log.Debug("step.start", "step", "pom-driver-inject")
 	t0 = time.Now()
 	clonedPomPath := cloneRoot + "/pom.xml"
 	if err := maven.InjectDriverDependency(clonedPomPath); err != nil {
@@ -345,6 +407,13 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	pass("pom-driver-inject", time.Since(t0))
 
 	// --- Step 6c: Patch liquibase.properties ---
+	log.Info("step.start", "step", "properties-patch",
+		"props_path", propsPath,
+		"alias_host", lbCoords.AliasHost,
+		"alias_port", lbCoords.AliasPort,
+		"db_user", lbCoords.User,
+		"db_name", lbCoords.DBName,
+	)
 	t0 = time.Now()
 	if err := deps.Patcher.Patch(propsPath, lbCoords); err != nil {
 		return fail("properties-patch", "failed to patch liquibase.properties", err)
@@ -355,6 +424,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	// When a PreSyncValidator is wired, it runs here — before the ephemeral sync —
 	// mirroring the real pipeline's validate → validate-ephemeral order.
 	// A nil validator is treated as the no-op default (always passes).
+	log.Debug("step.start", "step", "pre-sync-validate")
 	t0 = time.Now()
 	preSyncValidator := deps.PreSyncValidator
 	if preSyncValidator == nil {
@@ -374,13 +444,20 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}
 
 	// --- Step 7: dbflow:sync ---
+	syncParamList := syncParams()
+	log.Info("step.start", "step", maven.GoalSync,
+		"goal", maven.GoalSync,
+		"mvn_cmd", buildRedactedMvnCmd(maven.GoalSync, syncParamList),
+		"network", deps.NetworkName,
+	)
 	t0 = time.Now()
-	syncResult, err := deps.Maven.Run(ctx, cloneRoot, maven.GoalSync, syncParams(), mavenOut)
+	syncResult, err := deps.Maven.Run(ctx, cloneRoot, maven.GoalSync, syncParamList, mavenOut)
 	if err != nil {
 		return fail(maven.GoalSync, "maven runner error during sync", err)
 	}
 	syncResult.Duration = time.Since(t0)
 	syncResult.DurationMs = syncResult.Duration.Milliseconds()
+	log.Debug("step.done", "step", maven.GoalSync, "duration_ms", syncResult.DurationMs, "status", syncResult.Status)
 	steps = append(steps, syncResult)
 	if syncResult.Status != domain.StepStatusPassed {
 		overallStatus = domain.StatusFailed
@@ -388,21 +465,31 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}
 
 	// --- Step 8: First-tag resolution ---
+	log.Info("step.start", "step", "first-tag")
 	t0 = time.Now()
 	firstTag, err := deps.Tags.FirstTag(cloneRoot)
 	if err != nil {
 		return fail("first-tag", "first-tag resolution failed", err)
 	}
+	log.Debug("first-tag resolved", "tag", firstTag)
 	pass("first-tag", time.Since(t0))
 
 	// --- Step 9: dbflow:rollback ---
+	rollbackParamList := rollbackParams(firstTag)
+	log.Info("step.start", "step", maven.GoalRollback,
+		"goal", maven.GoalRollback,
+		"tag", firstTag,
+		"mvn_cmd", buildRedactedMvnCmd(maven.GoalRollback, rollbackParamList),
+		"network", deps.NetworkName,
+	)
 	t0 = time.Now()
-	rollbackResult, err := deps.Maven.Run(ctx, cloneRoot, maven.GoalRollback, rollbackParams(firstTag), mavenOut)
+	rollbackResult, err := deps.Maven.Run(ctx, cloneRoot, maven.GoalRollback, rollbackParamList, mavenOut)
 	if err != nil {
 		return fail(maven.GoalRollback, "maven runner error during rollback", err)
 	}
 	rollbackResult.Duration = time.Since(t0)
 	rollbackResult.DurationMs = rollbackResult.Duration.Milliseconds()
+	log.Debug("step.done", "step", maven.GoalRollback, "duration_ms", rollbackResult.DurationMs, "status", rollbackResult.Status)
 	steps = append(steps, rollbackResult)
 	if rollbackResult.Status != domain.StepStatusPassed {
 		overallStatus = domain.StatusFailed
@@ -454,6 +541,38 @@ func countSQLFilesInDir(dir string) (int, error) {
 		return 0, nil
 	}
 	return count, err
+}
+
+// collectSQLFileNames returns the base names of all .sql files found directly
+// under dir (recursive). Used to log the overlay file list before Apply is called.
+// On any error, returns the files collected so far (best-effort).
+func collectSQLFileNames(dir string) []string {
+	var names []string
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		if strings.EqualFold(filepath.Ext(d.Name()), ".sql") {
+			names = append(names, d.Name())
+		}
+		return nil
+	})
+	return names
+}
+
+// buildRedactedMvnCmd returns a human-readable representation of the Maven
+// command that will be executed inside the container. Parameters are included
+// as-is; the goal is shown. This is safe to log — callers must never include
+// raw tokens in params.
+func buildRedactedMvnCmd(goal string, params []string) string {
+	parts := []string{
+		"mvn", "-f", "/work/pom.xml", "-B",
+		"-s", "/work/settings.xml",
+		"-Dmaven.repo.local=/m2",
+		goal,
+	}
+	parts = append(parts, "-Dparams="+strings.Join(params, " "))
+	return strings.Join(parts, " ")
 }
 
 func tempCloneDir() string {
