@@ -66,7 +66,8 @@ func (m *multiHandler) WithGroup(name string) slog.Handler {
 
 // NewDualSink returns a *slog.Logger backed by a fan-out handler:
 //   - consoleW receives records at consoleLevel and above (text format).
-//   - fileW receives ALL records at DEBUG and above (text format, always verbose).
+//   - fileW receives ALL records at DEBUG and above (readable enterprise format:
+//     [YYYY-MM-DD HH:MM:SS]  LEVEL  ▸ message    key=val).
 //
 // Callers must never pass raw secret values as log attributes. The logging
 // package trusts that all attribute values have already been redacted by the
@@ -75,10 +76,9 @@ func NewDualSink(consoleW, fileW io.Writer, consoleLevel slog.Level) *slog.Logge
 	consoleHandler := slog.NewTextHandler(consoleW, &slog.HandlerOptions{
 		Level: consoleLevel,
 	})
-	fileHandler := slog.NewTextHandler(fileW, &slog.HandlerOptions{
-		// File sink always records everything.
-		Level: slog.LevelDebug,
-	})
+	// File sink uses the enterprise readable format (not raw slog logfmt).
+	// Always records DEBUG and above so every event lands in execution.log.
+	fileHandler := NewReadableHandler(fileW, slog.LevelDebug)
 	return slog.New(&multiHandler{
 		console: consoleHandler,
 		file:    fileHandler,
