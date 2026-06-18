@@ -6,9 +6,12 @@ import "time"
 type Status string
 
 const (
-	StatusPassed  Status = "PASSED"
-	StatusFailed  Status = "FAILED"
-	StatusAborted Status = "ABORTED"
+	StatusPassed     Status = "PASSED"
+	StatusFailed     Status = "FAILED"
+	StatusAborted    Status = "ABORTED"
+	// StatusUsageError indicates a configuration or usage problem (missing SQLInput,
+	// bad flags, etc.). main.go maps this to exit code 2.
+	StatusUsageError Status = "USAGE_ERROR"
 )
 
 // StepStatus is the outcome of a single validation step.

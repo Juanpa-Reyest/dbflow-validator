@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/config"
@@ -43,6 +46,10 @@ type Deps struct {
 	// When set, ValidatePreSync is called after properties-patch and before sync.
 	// A non-nil error aborts the pipeline with step name "pre-sync-validate".
 	PreSyncValidator domain.PreSyncValidator
+	// Overlayer copies the developer's local SQLInput tree into the cloned repo's
+	// src/main/resources/SQLInput/ directory before sync. Leave nil to skip the
+	// overlay step (backward-compatible with tests that do not wire an overlayer).
+	Overlayer domain.Overlayer
 }
 
 // Run executes the full linear validation flow:
@@ -92,6 +99,21 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		return buildReport(started, cfg, overallStatus, steps)
 	}
 
+	// failUsage signals a configuration/usage error (exit code 2).
+	// Use this for pre-clone guards like missing or empty SQLInput.
+	failUsage := func(name string, msg string, err error) domain.RunReport {
+		if err != nil {
+			msg = fmt.Sprintf("%s: %v", msg, err)
+		}
+		steps = append(steps, domain.StepResult{
+			Name:   name,
+			Status: domain.StepStatusFailed,
+			Error:  msg,
+		})
+		overallStatus = domain.StatusUsageError
+		return buildReport(started, cfg, overallStatus, steps)
+	}
+
 	pass := func(name string, duration time.Duration) {
 		steps = append(steps, domain.StepResult{
 			Name:       name,
@@ -99,6 +121,18 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 			Duration:   duration,
 			DurationMs: duration.Milliseconds(),
 		})
+	}
+
+	// --- Step 0: Input check (fail-fast guard) ---
+	// Validate the local SQLInput directory BEFORE any clone, container, or Maven
+	// operation. If the path is missing or contains no .sql files, abort here.
+	// This avoids a cryptic Maven "SQLInput vacía" BUILD FAILURE downstream.
+	// Uses StatusUsageError so main.go maps it to exit code 2.
+	if cfg.SQLInputPath != "" {
+		if n, err := countSQLFilesInDir(cfg.SQLInputPath); err != nil || n == 0 {
+			msg := fmt.Sprintf("no pending SQL found in %s — nothing to validate", cfg.SQLInputPath)
+			return failUsage("input-check", msg, domain.ErrNoPendingSQL)
+		}
 	}
 
 	// --- Step 1: Preflight ---
@@ -144,6 +178,19 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		return fail("engine-guard", "engine detection failed", err)
 	}
 	pass("engine-guard", time.Since(t0))
+
+	// --- Step 3b: SQLInput overlay ---
+	// Copy the developer's local SQLInput tree into the clone's
+	// src/main/resources/SQLInput/ directory before starting any container or Maven.
+	// When deps.Overlayer is nil (legacy / test without overlay), skip this step.
+	if deps.Overlayer != nil {
+		t0 = time.Now()
+		destSQLInput := cloneRoot + "/src/main/resources/SQLInput"
+		if _, err := deps.Overlayer.Apply(cfg.SQLInputPath, destSQLInput); err != nil {
+			return fail("overlay", "SQLInput overlay failed", err)
+		}
+		pass("overlay", time.Since(t0))
+	}
 
 	// --- Step 4: Start container ---
 	t0 = time.Now()
@@ -346,6 +393,25 @@ func buildReport(started time.Time, cfg config.Config, status domain.Status, ste
 		Started:    started,
 		Ended:      ended,
 	}
+}
+
+// countSQLFilesInDir returns the count of regular .sql files in dir (recursive).
+// Returns (0, nil) if dir does not exist — callers treat that as "no SQL found".
+func countSQLFilesInDir(dir string) (int, error) {
+	count := 0
+	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, e error) error {
+		if e != nil {
+			return e
+		}
+		if !d.IsDir() && d.Type().IsRegular() && strings.EqualFold(filepath.Ext(d.Name()), ".sql") {
+			count++
+		}
+		return nil
+	})
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	return count, err
 }
 
 func tempCloneDir() string {

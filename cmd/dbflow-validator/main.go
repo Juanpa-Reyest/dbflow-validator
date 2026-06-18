@@ -215,6 +215,12 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 }
 
 // exitCode maps domain.Status to a UNIX exit code.
+//
+// Exit code contract:
+//   0  — PASSED
+//   1  — FAILED (validation failure — sync or rollback failed)
+//   2  — USAGE_ERROR or unknown (config/usage error: missing SQLInput, bad flags, etc.)
+//   130 — ABORTED (SIGINT / SIGTERM)
 func exitCode(s domain.Status) int {
 	switch s {
 	case domain.StatusPassed:
@@ -223,6 +229,8 @@ func exitCode(s domain.Status) int {
 		return 1
 	case domain.StatusAborted:
 		return 130
+	case domain.StatusUsageError:
+		return 2
 	default:
 		return 2
 	}

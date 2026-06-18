@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -329,5 +330,104 @@ func TestOrchestrator_PreSyncValidator_Failure(t *testing.T) {
 		t.Error("expected step 'pre-sync-validate' in report, not found")
 	} else if preValidStep.Status != domain.StepStatusFailed {
 		t.Errorf("expected pre-sync-validate FAILED, got %v", preValidStep.Status)
+	}
+}
+
+// ---- Fail-fast guard tests (Phase 3) ----
+
+// mockCloner tracks whether Clone was called — used to assert the cloner was NOT invoked.
+type mockCloner struct {
+	called bool
+	root   string
+	err    error
+}
+
+func (m *mockCloner) Clone(_ context.Context, _ domain.CloneOptions) (string, error) {
+	m.called = true
+	return m.root, m.err
+}
+
+// TestRun_InputCheck_MissingSQLInput verifies that when cfg.SQLInputPath does not
+// exist on disk, the orchestrator fails early with step "input-check" and never calls Clone.
+func TestRun_InputCheck_MissingSQLInput(t *testing.T) {
+	cloner := &mockCloner{}
+	deps := happyDeps(t)
+	deps.Cloner = cloner
+
+	cfg := testCfg()
+	cfg.SQLInputPath = "/nonexistent/path/that/does/not/exist/SQLInput"
+
+	report := orchestrator.Run(context.Background(), deps, cfg)
+
+	if report.Status != domain.StatusUsageError {
+		t.Errorf("expected USAGE_ERROR, got %v", report.Status)
+	}
+	if cloner.called {
+		t.Error("Clone must NOT be called when SQLInput guard fails")
+	}
+
+	// Find input-check step.
+	var inputStep *domain.StepResult
+	for i := range report.Steps {
+		if report.Steps[i].Name == "input-check" {
+			inputStep = &report.Steps[i]
+			break
+		}
+	}
+	if inputStep == nil {
+		t.Fatal("expected step 'input-check' in report, not found")
+	}
+	if inputStep.Status != domain.StepStatusFailed {
+		t.Errorf("expected input-check FAILED, got %v", inputStep.Status)
+	}
+	if inputStep.Error == "" {
+		t.Error("input-check step must have a non-empty error message")
+	}
+	// Error must contain "nothing to validate".
+	if !strings.Contains(inputStep.Error, "nothing to validate") {
+		t.Errorf("error should contain 'nothing to validate', got: %q", inputStep.Error)
+	}
+}
+
+// TestRun_InputCheck_EmptyDir verifies that when cfg.SQLInputPath exists but contains
+// no .sql files, the orchestrator fails early with step "input-check".
+func TestRun_InputCheck_EmptyDir(t *testing.T) {
+	emptyDir := t.TempDir() // exists but contains no files
+
+	cloner := &mockCloner{}
+	deps := happyDeps(t)
+	deps.Cloner = cloner
+
+	cfg := testCfg()
+	cfg.SQLInputPath = emptyDir
+
+	report := orchestrator.Run(context.Background(), deps, cfg)
+
+	if report.Status != domain.StatusUsageError {
+		t.Errorf("expected USAGE_ERROR, got %v", report.Status)
+	}
+	if cloner.called {
+		t.Error("Clone must NOT be called when SQLInput dir is empty")
+	}
+
+	var inputStep *domain.StepResult
+	for i := range report.Steps {
+		if report.Steps[i].Name == "input-check" {
+			inputStep = &report.Steps[i]
+			break
+		}
+	}
+	if inputStep == nil {
+		t.Fatal("expected step 'input-check' in report, not found")
+	}
+	if inputStep.Status != domain.StepStatusFailed {
+		t.Errorf("expected input-check FAILED, got %v", inputStep.Status)
+	}
+	if !strings.Contains(inputStep.Error, "nothing to validate") {
+		t.Errorf("error should contain 'nothing to validate', got: %q", inputStep.Error)
+	}
+	// Must not contain Maven output.
+	if strings.Contains(inputStep.Error, "BUILD FAILURE") {
+		t.Error("error must not contain Maven BUILD FAILURE output")
 	}
 }
