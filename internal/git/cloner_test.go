@@ -216,6 +216,54 @@ func TestGitCloner_SSH(t *testing.T) {
 	})
 }
 
+// TestClone_SurfacesGitStderr verifies that when git exits non-zero with stderr output,
+// the error message contains the stderr text, does not contain the raw token,
+// and does not contain the injected realURL (with token embedded).
+func TestClone_SurfacesGitStderr(t *testing.T) {
+	const knownStderr = "remote branch integration not found at origin"
+	const rawToken = "super-secret-token-xyz"
+
+	// Fake exec: the command writes known stderr text and exits non-zero.
+	// We use a shell helper that writes to fd 2 and exits with code 1.
+	fakeExec := func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		// Use a shell oneliner: write stderr and exit 1.
+		cmd := exec.CommandContext(ctx, "sh", "-c",
+			"echo '"+knownStderr+"' >&2; exit 1")
+		return cmd
+	}
+
+	dir := t.TempDir()
+	cloner := internalgit.NewCloner(fakeExec, os.MkdirAll)
+
+	opts := domain.CloneOptions{
+		RepoURL: "https://github.com/example/repo.git",
+		Branch:  "integration",
+		Token:   domain.NewSecret(rawToken),
+		DestDir: filepath.Join(dir, "clone"),
+	}
+
+	_, err := cloner.Clone(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected Clone to fail with fakeExec returning non-zero")
+	}
+
+	errStr := err.Error()
+
+	// Must contain the git stderr text.
+	if !strings.Contains(errStr, knownStderr) {
+		t.Errorf("error should contain git stderr %q, got: %v", knownStderr, errStr)
+	}
+	// Must NOT contain the raw token.
+	if strings.Contains(errStr, rawToken) {
+		t.Errorf("raw token found in error message: %v", errStr)
+	}
+	// Must NOT contain the injected realURL (which would embed the token).
+	injectedURL := "https://x-access-token:" + rawToken + "@github.com/example/repo.git"
+	if strings.Contains(errStr, injectedURL) {
+		t.Errorf("injected realURL with token found in error message: %v", errStr)
+	}
+}
+
 func TestGitCloner_Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in -short mode")

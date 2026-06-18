@@ -5,6 +5,7 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -70,11 +71,20 @@ func (c *GitCloner) Clone(ctx context.Context, opts domain.CloneOptions) (string
 	args := []string{"clone", "--branch", opts.Branch, "--depth", "1", realURL, opts.DestDir}
 	cmd := c.execFn(ctx, "git", args...)
 	cmd.Stdout = nil
-	cmd.Stderr = nil
+	// Capture git's stderr into a buffer so we can include it in the error message.
+	// This makes failures like "remote branch X not found" visible instead of the
+	// bare "exit status 128". The buffer is safe to include: git does not echo the
+	// injected token into stderr; only the redacted original URL is surfaced.
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Run(); err != nil {
 		// Never include the real URL in the error message (it may contain the token).
 		redactedURL := redactURL(opts.RepoURL)
+		stderrText := strings.TrimSpace(stderrBuf.String())
+		if stderrText != "" {
+			return "", fmt.Errorf("%w: git clone %s: %v: %s", domain.ErrCloneFailed, redactedURL, err, stderrText)
+		}
 		return "", fmt.Errorf("%w: git clone %s: %v", domain.ErrCloneFailed, redactedURL, err)
 	}
 
