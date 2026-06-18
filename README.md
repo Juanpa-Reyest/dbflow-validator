@@ -65,7 +65,8 @@ It's **one file**. Download the one for your system, run it, answer the prompt. 
 
 ## What it asks you
 
-When you run it with no options, it prompts for the only two things it needs:
+When you run it with no options, it prompts for the repository URL.
+If the URL is HTTPS it also prompts for an access token:
 
 ```
 Repository URL:        https://github.com/your-org/your-archetype.git
@@ -73,6 +74,10 @@ Git access token (hidden):
 ```
 
 The token is typed hidden and is **never** written to disk, logs, or anywhere — it's only used to clone.
+
+> **SSH keys?** If you use an SSH URL (`git@github.com:your-org/your-archetype.git`),
+> the tool clones using your existing SSH agent/keys — **no access token needed**.
+> SSH URLs skip the token prompt entirely.
 
 ---
 
@@ -100,9 +105,14 @@ Overall: PASSED
 You don't have to use the prompt. You can pass everything as options:
 
 ```bash
-# Provide the token via environment variable + the repo via a flag
+# HTTPS: provide the token via environment variable + the repo via a flag
 DBFLOW_GIT_TOKEN=<your-token> dbflow-validator \
   --repo-url https://github.com/your-org/your-archetype.git \
+  --base-branch integracion
+
+# SSH: no token needed — uses your existing SSH keys automatically
+dbflow-validator \
+  --repo-url git@github.com:your-org/your-archetype.git \
   --base-branch integracion
 
 # Get machine-readable JSON instead of the console view
@@ -128,7 +138,7 @@ Run `dbflow-validator --help` for the full list any time.
 
 | Environment variable | Description |
 |----------------------|-------------|
-| `DBFLOW_GIT_TOKEN` | Git access token (instead of the interactive prompt; never logged) |
+| `DBFLOW_GIT_TOKEN` | Git access token for HTTPS URLs (instead of the interactive prompt; never logged). Not needed for SSH URLs. |
 
 ### Exit codes
 
