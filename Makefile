@@ -22,8 +22,9 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY) ./cmd/dbflow-validator/
 	@echo "Built $(DIST)/$(BINARY) (version=$(VERSION))"
 
-## build-all — Cross-compile for all supported platforms.
-build-all: build-linux-amd64 build-darwin-amd64 build-darwin-arm64 build-windows-amd64
+## build-all — Build the native binary AND cross-compile for all supported platforms.
+## Includes `build` so the suffixless dist/dbflow-validator never goes stale.
+build-all: build build-linux-amd64 build-darwin-amd64 build-darwin-arm64 build-windows-amd64
 
 build-linux-amd64:
 	@mkdir -p $(DIST)
