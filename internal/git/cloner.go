@@ -1,6 +1,7 @@
 // Package git provides a git clone adapter for the dbflow-validator.
 // Token auth is performed by injecting the token into the HTTPS URL in memory.
 // Logged arguments always use the redacted form; the raw token is never logged.
+// SSH URLs are cloned as-is using the host's SSH agent/keys — no token needed.
 package git
 
 import (
@@ -11,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
+	"github.com/dbflow-validator/dbflow-validator/internal/giturl"
 )
 
 // ExecFunc is the injectable exec.CommandContext factory used in the cloner.
@@ -96,13 +98,23 @@ func injectToken(repoURL, token string) string {
 	return repoURL
 }
 
-// redactURL returns a URL safe for logging — replaces any embedded credentials with ***.
+// redactURL returns a URL safe for logging.
+//
+//   - SSH URLs carry no embedded secret: returned as-is.
+//   - HTTPS URLs: the original URL (without injected token) is returned as-is;
+//     the token-injected form is never passed to this function.
+//   - Any other form with an embedded "@" (e.g. user:pass@host) is redacted.
 func redactURL(repoURL string) string {
-	const httpsPrefix = "https://"
-	if strings.HasPrefix(repoURL, httpsPrefix) {
-		return repoURL // original URL has no token; safe to log
+	// SSH URLs have no embedded credentials — safe to log verbatim.
+	if giturl.IsSSHURL(repoURL) {
+		return repoURL
 	}
-	return "https://***@(redacted)"
+	// HTTPS: the caller always passes the original URL (no injected token), safe to log.
+	if strings.HasPrefix(repoURL, "https://") || strings.HasPrefix(repoURL, "http://") {
+		return repoURL
+	}
+	// Unknown scheme with potential credentials — redact conservatively.
+	return "(redacted-url)"
 }
 
 // validateStructure checks that the cloned repo has the expected archetype layout.
