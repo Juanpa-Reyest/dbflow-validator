@@ -10,16 +10,18 @@ import (
 
 // mockPromptReader implements config.PromptReader for testing.
 type mockPromptReader struct {
-	url   string
-	token string
-	urlErr error
-	tokenErr error
+	url              string
+	token            string
+	urlErr           error
+	tokenErr         error
+	tokenPromptCalled bool
 }
 
 func (m *mockPromptReader) ReadRepoURL() (string, error) {
 	return m.url, m.urlErr
 }
 func (m *mockPromptReader) ReadToken() (domain.Secret, error) {
+	m.tokenPromptCalled = true
 	if m.tokenErr != nil {
 		return domain.Secret{}, m.tokenErr
 	}
@@ -221,4 +223,108 @@ func TestResolveWithPrompter(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestResolveSSH verifies that SSH URLs bypass the token requirement entirely.
+func TestResolveSSH(t *testing.T) {
+	t.Run("scp-style SSH URL via flag: no token required, no prompt called", func(t *testing.T) {
+		mock := &mockPromptReader{}
+		cfg, err := config.ResolveWithPrompter(
+			[]string{"--repo-url", "git@github.com:org/repo.git"},
+			func(string) string { return "" }, // no env token
+			mock,
+		)
+		if err != nil {
+			t.Fatalf("unexpected error for SSH URL: %v", err)
+		}
+		if cfg.RepoURL != "git@github.com:org/repo.git" {
+			t.Errorf("RepoURL: got %q, want scp-style URL", cfg.RepoURL)
+		}
+		if mock.tokenPromptCalled {
+			t.Error("ReadToken() was called for an SSH URL — it must not be")
+		}
+		if cfg.Token.Reveal() != "" {
+			t.Error("Token must be empty for SSH URL")
+		}
+	})
+
+	t.Run("ssh:// URL via flag: no token required, no prompt called", func(t *testing.T) {
+		mock := &mockPromptReader{}
+		cfg, err := config.ResolveWithPrompter(
+			[]string{"--repo-url", "ssh://git@github.com/org/repo.git"},
+			func(string) string { return "" },
+			mock,
+		)
+		if err != nil {
+			t.Fatalf("unexpected error for ssh:// URL: %v", err)
+		}
+		if mock.tokenPromptCalled {
+			t.Error("ReadToken() was called for an ssh:// URL — it must not be")
+		}
+		if cfg.Token.Reveal() != "" {
+			t.Error("Token must be empty for ssh:// URL")
+		}
+	})
+
+	t.Run("SSH URL via prompt (interactive): URL prompted first, then no token prompt", func(t *testing.T) {
+		mock := &mockPromptReader{url: "git@github.com:org/repo.git"}
+		cfg, err := config.ResolveWithPrompter(
+			[]string{}, // no flags — falls through to prompt
+			func(string) string { return "" },
+			mock,
+		)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.RepoURL != "git@github.com:org/repo.git" {
+			t.Errorf("RepoURL: got %q", cfg.RepoURL)
+		}
+		if mock.tokenPromptCalled {
+			t.Error("ReadToken() was called for an SSH URL obtained via prompt — it must not be")
+		}
+	})
+
+	t.Run("SSH URL with DBFLOW_GIT_TOKEN env set: token env ignored, no error", func(t *testing.T) {
+		mock := &mockPromptReader{}
+		cfg, err := config.ResolveWithPrompter(
+			[]string{"--repo-url", "git@github.com:org/repo.git"},
+			func(key string) string {
+				if key == "DBFLOW_GIT_TOKEN" {
+					return "should-be-ignored"
+				}
+				return ""
+			},
+			mock,
+		)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Token env value is accepted but not required; SSH path works regardless.
+		_ = cfg
+	})
+
+	t.Run("HTTPS URL without token and no prompter: still errors (HTTPS behavior unchanged)", func(t *testing.T) {
+		_, err := config.ResolveWithPrompter(
+			[]string{"--repo-url", "https://github.com/org/repo.git"},
+			func(string) string { return "" },
+			nil, // no prompter — non-TTY
+		)
+		if err == nil {
+			t.Fatal("expected error for HTTPS URL with no token and no prompter")
+		}
+		if !strings.Contains(err.Error(), "DBFLOW_GIT_TOKEN") {
+			t.Errorf("error should mention DBFLOW_GIT_TOKEN, got: %v", err)
+		}
+	})
+
+	t.Run("HTTPS URL with no token no prompter: error unchanged", func(t *testing.T) {
+		_, err := config.ResolveWithPrompter(
+			[]string{"--repo-url", "https://github.com/org/repo.git"},
+			func(string) string { return "" },
+			nil,
+		)
+		if err == nil {
+			t.Error("expected error for HTTPS without token")
+		}
+	})
 }

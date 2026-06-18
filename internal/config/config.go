@@ -14,6 +14,7 @@ import (
 	"github.com/moby/term"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
+	"github.com/dbflow-validator/dbflow-validator/internal/giturl"
 )
 
 const (
@@ -189,19 +190,23 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 	}
 
 	// Resolve token: env > prompt.
+	// SSH URLs (scp-style or ssh://) rely on the host SSH agent/keys and do NOT
+	// require a personal access token — skip token resolution entirely for them.
 	var token domain.Secret
-	rawToken := env(tokenEnvVar)
-	if rawToken != "" {
-		token = domain.NewSecret(rawToken)
-	} else {
-		if prompter == nil {
-			return Config{}, fmt.Errorf("%s environment variable is required; set it to your git access token (or run interactively with a TTY)", tokenEnvVar)
+	if !giturl.IsSSHURL(repoURL) {
+		rawToken := env(tokenEnvVar)
+		if rawToken != "" {
+			token = domain.NewSecret(rawToken)
+		} else {
+			if prompter == nil {
+				return Config{}, fmt.Errorf("%s environment variable is required; set it to your git access token (or run interactively with a TTY)", tokenEnvVar)
+			}
+			t, err := prompter.ReadToken()
+			if err != nil {
+				return Config{}, fmt.Errorf("interactive prompt for token: %w", err)
+			}
+			token = t
 		}
-		t, err := prompter.ReadToken()
-		if err != nil {
-			return Config{}, fmt.Errorf("interactive prompt for token: %w", err)
-		}
-		token = t
 	}
 
 	return Config{
