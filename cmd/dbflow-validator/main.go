@@ -196,8 +196,12 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		os.Exit(130)
 	}()
 
-	// --- 4. Wire concrete adapters ---
+	// --- 4. Print banner at the very top of console output ---
+	// The banner is emitted once here, before the orchestrator starts and before
+	// any live progress line (▸ step …). RenderQuiet (step 8) must NOT re-emit it.
+	fmt.Fprint(os.Stdout, report.Banner(buildVersion))
 
+	// --- 5. Wire concrete adapters ---
 	// Create per-run Docker network so Postgres and Maven containers share a DNS alias.
 	// The network cleanup is registered in orchestrator.Run via deps.NetworkCleanup (LIFO).
 	_, networkName, networkCleanup, netErr := container.NewNetwork(ctx)
@@ -253,10 +257,10 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		OnStep: consoleProgressPrinter(os.Stdout),
 	}
 
-	// --- 5. Run orchestration ---
+	// --- 6. Run orchestration ---
 	rpt := orchestrator.Run(ctx, deps, cfg)
 
-	// --- 6. Close live log file and render structured execution.log ---
+	// --- 7. Close live log file and render structured execution.log ---
 	// During the run the dual-sink logger wrote a raw live trace to execution.log
 	// (crash-safety). Now that the run is complete, we close the file, render the
 	// final structured document (banner + summary table + block traces), and
@@ -274,11 +278,11 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		}
 	}
 
-	// --- 7. Console output (quiet: banner + progress summary + result pointer) ---
-	fmt.Fprint(os.Stdout, report.Banner(buildVersion))
+	// --- 8. Console summary (step table + RESULT + execution.log pointer) ---
+	// Banner was already printed at step 4 (before orchestrator ran). Do NOT re-emit it here.
 	report.NewConsoleRenderer().RenderQuiet(rpt, runDirPath, os.Stdout)
 
-	// --- 8. JSON output (when requested via --output-format or --output-file) ---
+	// --- 9. JSON output (when requested via --output-format or --output-file) ---
 	if cfg.OutputFormat == "json" || cfg.OutputFile != "" {
 		jsonRenderer := report.NewJSONRenderer()
 		jsonBytes, err := jsonRenderer.Render(rpt)
@@ -297,7 +301,7 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		}
 	}
 
-	// --- 9. Always write report.json to the run dir ---
+	// --- 10. Always write report.json to the run dir ---
 	// This is written regardless of --output-format so every run leaves a
 	// machine-readable record for post-mortem inspection.
 	if runDirPath != "" {
@@ -313,7 +317,7 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		}
 	}
 
-	// --- 10. Exit code ---
+	// --- 11. Exit code ---
 	return exitCode(rpt.Status)
 }
 
