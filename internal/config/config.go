@@ -87,7 +87,7 @@ func (r *DefaultPromptReader) ReadRepoURL() (string, error) {
 		}
 		return "", fmt.Errorf("read repo URL: unexpected EOF")
 	}
-	url := strings.TrimSpace(scanner.Text())
+	url := sanitizeRepoURL(scanner.Text())
 	if url == "" {
 		return "", fmt.Errorf("repository URL must not be empty")
 	}
@@ -121,7 +121,7 @@ func (r *DefaultPromptReader) ReadToken() (domain.Secret, error) {
 		}
 		return domain.Secret{}, fmt.Errorf("read token: unexpected EOF")
 	}
-	raw := scanner.Text()
+	raw := sanitizeToken(scanner.Text())
 	if raw == "" {
 		return domain.Secret{}, fmt.Errorf("git access token must not be empty")
 	}
@@ -135,7 +135,7 @@ func (r *DefaultPromptReader) readTokenVisible() (domain.Secret, error) {
 	if !scanner.Scan() {
 		return domain.Secret{}, fmt.Errorf("read token: unexpected EOF")
 	}
-	raw := strings.TrimSpace(scanner.Text())
+	raw := sanitizeToken(scanner.Text())
 	fmt.Fprintln(os.Stderr)
 	if raw == "" {
 		return domain.Secret{}, fmt.Errorf("git access token must not be empty")
@@ -197,6 +197,9 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 	}
 
 	// Resolve repo URL: flag > prompt.
+	// Defensively sanitize the flag value too — shell completion or copy-paste
+	// may inject ANSI sequences even in non-interactive mode.
+	repoURL = sanitizeRepoURL(repoURL)
 	if repoURL == "" {
 		if prompter == nil {
 			return Config{}, fmt.Errorf("--repo-url is required (or run interactively with a TTY)")
