@@ -9,18 +9,27 @@ it created is cleaned up automatically.
 
 ---
 
-## Download
+## Get it — there's nothing to install
 
-Go to the [Releases page](https://github.com/Juanpa-Reyest/dbflow-validator/releases) and download the binary for your OS:
+You **don't install anything**. You download **one file** (the one for your system), make it
+runnable, and run it — exactly like trying out any downloaded program.
 
-| OS | File |
-|----|------|
-| Linux (x86-64) | `dbflow-validator-linux-amd64` |
-| macOS Apple Silicon (M1+) | `dbflow-validator-darwin-arm64` |
-| macOS Intel | `dbflow-validator-darwin-amd64` |
-| Windows (x86-64) | `dbflow-validator-windows-amd64.exe` |
+Go to the [Releases page](https://github.com/Juanpa-Reyest/dbflow-validator/releases/latest)
+and download the **single file that matches your machine**:
 
-Optionally verify the download against `SHA256SUMS.txt` (also attached to each release), then follow the per-OS run steps below.
+| Your system | Download this ONE file |
+|-------------|------------------------|
+| 🐧 Linux | `dbflow-validator-linux-amd64` |
+| 🍎 macOS — Apple Silicon (M1/M2/M3…) | `dbflow-validator-darwin-arm64` |
+| 🍎 macOS — Intel | `dbflow-validator-darwin-amd64` |
+| 🪟 Windows | `dbflow-validator-windows-amd64.exe` |
+
+> **Why are there several files?** It's the *same program* compiled for each operating system —
+> like a "Download for Mac / Windows / Linux" button. A Linux executable can't run on Windows (and
+> vice versa), so we ship one per system. **Grab only the one for your machine.**
+> (`SHA256SUMS.txt` is optional — only if you want to verify the download.)
+
+Then run it — find your system below. 👇
 
 ---
 
@@ -38,9 +47,10 @@ You do **not** need Maven or Java installed — they run inside a container, aut
 
 ---
 
-## Quickstart for developers
+## Run it
 
-It's **one file**. Download the one for your system, run it, answer the prompt. That's it.
+You already downloaded **your one file** (above). Now make it runnable and run it — pick your system.
+There's no setup wizard: you run the file, it asks for your repo, and it validates.
 
 ### 🪟 Windows
 
