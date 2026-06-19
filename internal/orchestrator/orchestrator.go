@@ -19,6 +19,20 @@ import (
 	internalvendor "github.com/dbflow-validator/dbflow-validator/internal/vendor"
 )
 
+// redactURL removes any embedded userinfo (credentials) from a URL string so it
+// is safe to include in trace output.  Returns the original string unchanged when
+// it is not a valid URL or contains no userinfo.
+func redactURL(raw string) string {
+	// Simple token-based redact: strip everything between "://" and the first "@".
+	if i := strings.Index(raw, "://"); i >= 0 {
+		rest := raw[i+3:]
+		if j := strings.Index(rest, "@"); j >= 0 {
+			return raw[:i+3] + "<redacted>@" + rest[j+1:]
+		}
+	}
+	return raw
+}
+
 // StepEvent carries progress information for a single orchestration step.
 // It is delivered to Deps.OnStep both when a step starts (Done=false) and
 // when it completes (Done=true, Failed reflects the outcome).
@@ -181,7 +195,10 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		return buildReport(started, cfg, overallStatus, steps)
 	}
 
-	pass := func(name string, duration time.Duration) {
+	// passWithTrace records a passed step and populates StepResult.Trace with a
+	// multi-line summary of what the step did.  Use this for all non-Maven steps so
+	// every DETALLE block in execution.log carries meaningful content.
+	passWithTrace := func(name string, duration time.Duration, trace string) {
 		log.Debug("step.done", "step", name, "duration_ms", duration.Milliseconds())
 		notify(deps, name, true, false)
 		steps = append(steps, domain.StepResult{
@@ -189,6 +206,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 			Status:     domain.StepStatusPassed,
 			Duration:   duration,
 			DurationMs: duration.Milliseconds(),
+			Trace:      strings.TrimRight(trace, "\n"),
 		})
 	}
 
@@ -208,10 +226,17 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	log.Info("step.start", "step", "preflight")
 	notify(deps, "preflight", false, false)
 	t0 := time.Now()
-	if _, err := deps.Preflight.Check(ctx); err != nil {
+	toolStatuses, err := deps.Preflight.Check(ctx)
+	if err != nil {
 		return fail("preflight", "pre-flight host checks failed", err)
 	}
-	pass("preflight", time.Since(t0))
+	{
+		var lines []string
+		for _, ts := range toolStatuses {
+			lines = append(lines, fmt.Sprintf("%-10s found at %s", ts.Name, ts.Path))
+		}
+		passWithTrace("preflight", time.Since(t0), strings.Join(lines, "\n"))
+	}
 
 	// --- Step 2: Clone ---
 	log.Info("step.start", "step", "clone",
@@ -258,7 +283,15 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		// Move the clone into <runDir>/workspace/ for post-mortem inspection.
 		return MoveWorkspace(cloneRoot, filepath.Join(runDir, "workspace"))
 	})
-	pass("clone", time.Since(t0))
+	{
+		cloneTrace := fmt.Sprintf(
+			"repo    %s\nbranch  %s\ndest    %s\nstructure: liquibase.properties, master-changelog/ expected",
+			redactURL(cfg.RepoURL),
+			cfg.BaseBranch,
+			cloneRoot,
+		)
+		passWithTrace("clone", time.Since(t0), cloneTrace)
+	}
 
 	// Write settings.xml into the clone dir so the Maven container can pick it up
 	// at /work/settings.xml. This is required when MavenRepoCachePath is set and
@@ -281,7 +314,8 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		return fail("engine-guard", "engine detection failed", err)
 	}
 	log.Debug("engine resolved", "engine", detectedEngine)
-	pass("engine-guard", time.Since(t0))
+	passWithTrace("engine-guard", time.Since(t0),
+		fmt.Sprintf("detected engine: %s", detectedEngine))
 
 	// --- Step 3b: SQLInput overlay ---
 	// Copy the developer's local SQLInput tree into the clone's
@@ -296,10 +330,20 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		log.Debug("overlay file list", "files", strings.Join(overlayFiles, ", "), "count", len(overlayFiles))
 		t0 = time.Now()
 		destSQLInput := cloneRoot + "/src/main/resources/SQLInput"
-		if _, err := deps.Overlayer.Apply(cfg.SQLInputPath, destSQLInput); err != nil {
+		copiedCount, err := deps.Overlayer.Apply(cfg.SQLInputPath, destSQLInput)
+		if err != nil {
 			return fail("overlay", "SQLInput overlay failed", err)
 		}
-		pass("overlay", time.Since(t0))
+		{
+			var overlayLines []string
+			overlayLines = append(overlayLines,
+				fmt.Sprintf("files copied: %d  (src: %s → dest: %s)",
+					copiedCount, cfg.SQLInputPath, destSQLInput))
+			for _, f := range overlayFiles {
+				overlayLines = append(overlayLines, "  "+f)
+			}
+			passWithTrace("overlay", time.Since(t0), strings.Join(overlayLines, "\n"))
+		}
 	}
 
 	// --- Step 4: Start container ---
@@ -332,7 +376,19 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		"db", coords.DBName,
 		"user", coords.User,
 	)
-	pass("container-start", time.Since(t0))
+	{
+		containerTrace := fmt.Sprintf(
+			"image   %s\nhost    %s  port %d  (host-mapped)\nalias   %s:%d  (Docker network alias for Maven container)\ndb      %s  user %s",
+			deps.DBProvider.Image(),
+			coords.Host, coords.Port,
+			pgAlias, coords.AliasPort,
+			coords.DBName, coords.User,
+		)
+		if deps.NetworkName != "" {
+			containerTrace += fmt.Sprintf("\nnetwork %s", deps.NetworkName)
+		}
+		passWithTrace("container-start", time.Since(t0), containerTrace)
+	}
 
 	// --- Step 5: Readiness probe ---
 	log.Info("step.start", "step", "readiness-probe")
@@ -356,7 +412,16 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	if readinessErr != nil {
 		return fail("readiness-probe", "database readiness probe timed out", readinessErr)
 	}
-	pass("readiness-probe", time.Since(t0))
+	{
+		readinessElapsed := time.Since(t0)
+		readinessTrace := fmt.Sprintf(
+			"database accepting connections\nprobe elapsed: %s  (deadline: %s, initial interval: %s)",
+			readinessElapsed.Round(time.Millisecond),
+			policy.Deadline,
+			policy.InitialInterval,
+		)
+		passWithTrace("readiness-probe", readinessElapsed, readinessTrace)
+	}
 
 	// --- Step 6a: Schema extraction + lb_<schema> user + GRANT-target roles ---
 	// Extract the target schema name from the archetype DDL to derive the
@@ -410,7 +475,27 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 				"schema", lbUsername, "err", err)
 		}
 	}
-	pass("schema-setup", time.Since(t0))
+	{
+		schemaSetupDur := time.Since(t0)
+		var schemaLines []string
+		if schemaName != "" {
+			grantRoles, _ := liquibase.ExtractGrantTargetRolesFromArchetype(cloneRoot)
+			schemaLines = append(schemaLines,
+				fmt.Sprintf("schema          %s", schemaName),
+				fmt.Sprintf("lb user         %s  (password: [REDACTED])", lbUsername),
+				fmt.Sprintf("bookkeeping schema: %s", lbUsername),
+			)
+			if len(grantRoles) > 0 {
+				schemaLines = append(schemaLines,
+					fmt.Sprintf("grant-target roles created: %s", strings.Join(grantRoles, ", ")))
+			}
+		} else {
+			schemaLines = append(schemaLines,
+				fmt.Sprintf("no schema found in archetype DDL; using admin user: %s", lbUsername),
+			)
+		}
+		passWithTrace("schema-setup", schemaSetupDur, strings.Join(schemaLines, "\n"))
+	}
 
 	// Build lb_coords with the lb_<schema> user for liquibase.properties patching.
 	//
@@ -440,7 +525,9 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	if err := maven.InjectDriverDependency(clonedPomPath); err != nil {
 		return fail("pom-driver-inject", "failed to inject PostgreSQL driver into cloned pom.xml", err)
 	}
-	pass("pom-driver-inject", time.Since(t0))
+	passWithTrace("pom-driver-inject", time.Since(t0),
+		fmt.Sprintf("injected driver: %s:%s:%s into %s",
+			"org.postgresql", "postgresql", maven.PostgresDriverVersion, clonedPomPath))
 
 	// --- Step 6c: Patch liquibase.properties ---
 	log.Info("step.start", "step", "properties-patch",
@@ -455,7 +542,18 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	if err := deps.Patcher.Patch(propsPath, lbCoords); err != nil {
 		return fail("properties-patch", "failed to patch liquibase.properties", err)
 	}
-	pass("properties-patch", time.Since(t0))
+	{
+		jdbcHost := lbCoords.Host
+		jdbcPort := lbCoords.Port
+		if lbCoords.AliasHost != "" {
+			jdbcHost = lbCoords.AliasHost
+			jdbcPort = lbCoords.AliasPort
+		}
+		jdbcURL := fmt.Sprintf("jdbc:postgresql://%s:%d/%s", jdbcHost, jdbcPort, lbCoords.DBName)
+		passWithTrace("properties-patch", time.Since(t0),
+			fmt.Sprintf("url      %s\nusername %s\npassword [REDACTED]",
+				jdbcURL, lbCoords.User))
+	}
 
 	// --- Step 6d: Pre-sync validation (optional seam) ---
 	// When a PreSyncValidator is wired, it runs here — before the ephemeral sync —
@@ -468,10 +566,19 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	if preSyncValidator == nil {
 		preSyncValidator = domain.NoOpPreSyncValidator{}
 	}
+	isNoOp := deps.PreSyncValidator == nil
 	if err := preSyncValidator.ValidatePreSync(ctx, cloneRoot); err != nil {
 		return fail("pre-sync-validate", "pre-sync validation failed", err)
 	}
-	pass("pre-sync-validate", time.Since(t0))
+	{
+		var preSyncNote string
+		if isNoOp {
+			preSyncNote = "SQL rules validator not enabled (no-op seam); step is a pass-through"
+		} else {
+			preSyncNote = fmt.Sprintf("SQL rules validator ran against %s — passed", cloneRoot)
+		}
+		passWithTrace("pre-sync-validate", time.Since(t0), preSyncNote)
+	}
 
 	// Resolve the Maven output writer: use MavenOut if provided, otherwise discard.
 	// MavenOut is wired in main.go to the log file only; Maven verbose output
@@ -513,7 +620,8 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		return fail("first-tag", "first-tag resolution failed", err)
 	}
 	log.Debug("first-tag resolved", "tag", firstTag)
-	pass("first-tag", time.Since(t0))
+	passWithTrace("first-tag", time.Since(t0),
+		fmt.Sprintf("resolved rollback tag: %s  (from master-changelog)", firstTag))
 
 	// --- Step 9: dbflow:rollback ---
 	rollbackParamList := rollbackParams(firstTag)
