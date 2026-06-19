@@ -67,7 +67,7 @@ type fakeContainerProvider struct {
 	stopFn func() error
 }
 
-func (f *fakeContainerProvider) Start(_ context.Context) (domain.ContainerCoords, error) {
+func (f *fakeContainerProvider) Start(_ context.Context, _ string) (domain.ContainerCoords, error) {
 	return f.coords, f.err
 }
 

@@ -202,17 +202,11 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 	fmt.Fprint(os.Stdout, report.Banner(buildVersion))
 
 	// --- 5. Wire concrete adapters ---
-	// Create per-run Docker network so Postgres and Maven containers share a DNS alias.
-	// The network cleanup is registered in orchestrator.Run via deps.NetworkCleanup (LIFO).
-	_, networkName, networkCleanup, netErr := container.NewNetwork(ctx)
-	if netErr != nil {
-		fmt.Fprintf(os.Stderr, "dbflow-validator: create docker network: %v\n", netErr)
-		return 2
-	}
-	// Ensure network is removed even if orchestrator.Run panics or exits early.
-	defer func() { _ = networkCleanup() }()
-
-	pgProvider := container.NewPostgresProvider(networkName)
+	// The Docker network is created LAZILY inside the orchestrator at container-start.
+	// Early failures (preflight, clone, engine-guard, overlay) never create a network.
+	// The NetworkFactory closure captures ctx so the network removal uses the same
+	// context as the run (cancelled on SIGINT/SIGTERM).
+	pgProvider := container.NewPostgresProvider()
 	dbEng, err := engine.ProviderFor(engine.EnginePostgres)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dbflow-validator: engine provider: %v\n", err)
@@ -233,6 +227,9 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 	}
 
 	uid, gid := hostUIDGID()
+	// Build the Maven container runner with an empty network name — the orchestrator
+	// will call SetNetworkName on it after the network is created at container-start.
+	mavenRunner := maven.NewContainerRunner(maven.DefaultImage, "", mavenRepoCachePath, uid, gid)
 	deps := orchestrator.Deps{
 		Preflight: preflight.New(nil),
 		Cloner:    git.NewCloner(nil, nil),
@@ -240,12 +237,18 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 			eng:      dbEng,
 			provider: pgProvider,
 		},
-		Patcher:            liquibase.NewPatcher(),
-		Engine:             engine.NewDetector(),
-		Tags:               &liquibase.ChangelogResolver{},
-		Maven:              maven.NewContainerRunner(maven.DefaultImage, networkName, mavenRepoCachePath, uid, gid),
-		NetworkCleanup:     networkCleanup,
-		NetworkName:        networkName,
+		Patcher: liquibase.NewPatcher(),
+		Engine:  engine.NewDetector(),
+		Tags:    &liquibase.ChangelogResolver{},
+		Maven:   mavenRunner,
+		// NetworkFactory creates the Docker network lazily when the flow reaches
+		// container-start. If the run fails before that step, no network is created.
+		// container.NewNetwork returns (id, name, cleanup, err); the factory
+		// signature is (ctx) → (name, cleanup, err) so we wrap with a closure.
+		NetworkFactory: func(ctx context.Context) (string, func() error, error) {
+			_, name, cleanup, err := container.NewNetwork(ctx)
+			return name, cleanup, err
+		},
 		MavenRepoCachePath: mavenRepoCachePath,
 		Overlayer:          overlay.New(),
 		MavenOut:           mavenOut,

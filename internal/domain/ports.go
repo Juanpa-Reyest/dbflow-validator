@@ -60,8 +60,9 @@ type ContainerCoords struct {
 }
 
 // ContainerProvider starts and stops ephemeral database containers.
+// networkName is the Docker network to join; pass "" when no network is needed.
 type ContainerProvider interface {
-	Start(ctx context.Context) (ContainerCoords, error)
+	Start(ctx context.Context, networkName string) (ContainerCoords, error)
 	Stop(ctx context.Context) error
 }
 

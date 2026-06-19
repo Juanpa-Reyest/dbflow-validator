@@ -42,7 +42,9 @@ type ContainerRunner struct {
 //
 // Parameters:
 //   - image:         Docker image, e.g. "maven:3.9-eclipse-temurin-21" (DefaultImage).
-//   - networkName:   Name of the Docker network to join (from container.NewNetwork).
+//   - networkName:   Name of the Docker network to join. May be empty at construction
+//                    time and set later via SetNetworkName when the network is created
+//                    lazily (e.g. at container-start time in the orchestrator).
 //   - repoCachePath: Absolute host path to the vendored Maven repo; mounted RO at /m2.
 //   - uid, gid:      Host UID and GID for --user flag (pass os.Getuid/Getgid on Linux;
 //                    pass 0 to skip --user on non-Linux or for root).
@@ -57,6 +59,13 @@ func NewContainerRunner(image, networkName, repoCachePath string, uid, gid int) 
 		uid:           uid,
 		gid:           gid,
 	}
+}
+
+// SetNetworkName updates the Docker network that the Maven container will join on the
+// next Run call. Use this when the network is created lazily (after construction).
+// Not safe for concurrent use — call before the first Run.
+func (r *ContainerRunner) SetNetworkName(name string) {
+	r.networkName = name
 }
 
 // BuildContainerRequest constructs the testcontainers.ContainerRequest for a Maven run.

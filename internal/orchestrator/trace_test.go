@@ -91,8 +91,12 @@ func makeTraceDeps(t *testing.T) (orchestrator.Deps, config.Config, *bytes.Buffe
 		},
 		ReadinessPolicy: &fastPolicy,
 		Overlayer:       &fakeOverlayer{copied: 1},
-		NetworkName:     "dbflow-net-test01",
-		Logger:          logger,
+		// NetworkFactory creates a fake network with a known name so trace assertions
+		// can verify the network name appears in log output.
+		NetworkFactory: func(_ context.Context) (string, func() error, error) {
+			return "dbflow-net-test01", func() error { return nil }, nil
+		},
+		Logger: logger,
 	}
 
 	cfg := config.Config{

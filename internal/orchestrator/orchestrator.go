@@ -19,6 +19,14 @@ import (
 	internalvendor "github.com/dbflow-validator/dbflow-validator/internal/vendor"
 )
 
+// networkNamer is an optional interface implemented by MavenRunner adapters that
+// support receiving a Docker network name at runtime (after lazy network creation).
+// The orchestrator uses a type assertion to call SetNetworkName when available;
+// runners that do not implement it (e.g. unit-test fakes) simply ignore the call.
+type networkNamer interface {
+	SetNetworkName(name string)
+}
+
 // redactURL removes any embedded userinfo (credentials) from a URL string so it
 // is safe to include in trace output.  Returns the original string unchanged when
 // it is not a valid URL or contains no userinfo.
@@ -54,16 +62,16 @@ type Deps struct {
 	Patcher    domain.PropertiesPatcher
 	Engine     domain.EngineDetector
 	Tags       domain.TagResolver
-	Maven      domain.MavenRunner
-	// NetworkCleanup is the cleanup function returned by container.NewNetwork.
-	// When non-nil, it is registered FIRST in the LIFO CleanupRegistry so the
-	// Docker network is torn down LAST (after both containers are stopped).
-	// Leave nil when no Docker network is in use (e.g. unit tests).
-	NetworkCleanup func() error
-	// NetworkName is the Docker network name used to connect Postgres and Maven
-	// containers. Included in trace logs so engineers can correlate container IDs
-	// with the network. Leave empty when no Docker network is in use.
-	NetworkName string
+	Maven domain.MavenRunner
+	// NetworkFactory is called lazily at the container-start step to create the
+	// Docker network that Postgres and Maven containers share. It returns the
+	// network name, a cleanup function, and an error.
+	//
+	// The factory is called ONLY when the flow reaches container-start; early
+	// failures (preflight, clone, engine-guard, overlay) never invoke it and
+	// never create a network. Leave nil when no Docker network is needed (e.g.
+	// unit tests that do not spin real containers).
+	NetworkFactory func(ctx context.Context) (name string, cleanup func() error, err error)
 	// MavenRepoCachePath is the host path to the vendored Maven repository (mvn-vendor/repository).
 	// When non-empty, the orchestrator writes settings.xml into the clone dir so the
 	// ContainerRunner can pick it up at /work/settings.xml inside the Maven container.
@@ -268,32 +276,24 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}()
 
 	// Emit the run preamble at Info so it appears on the console at the default log level.
+	// The network name is not yet known (created lazily at container-start).
 	log.Info("run started",
 		"repo_url", cfg.RepoURL,
 		"base_branch", cfg.BaseBranch,
 		"sql_input", cfg.SQLInputPath,
-		"network", deps.NetworkName,
 	)
 
 	var steps []domain.StepResult
 	overallStatus := domain.StatusPassed
 
 	// cs accumulates workspace/resource metadata for the cleanup step trace.
-	// Fields are filled in as the run progresses. networkRegistered is set here
-	// (before network registration) so it is available for the trace builder.
+	// Fields are filled in as the run progresses.
+	// networkName and networkRegistered start empty/false and are updated lazily
+	// when the NetworkFactory is called at container-start.
 	cs := cleanupState{
 		runDir:        deps.RunDir,
 		keepWorkspace: deps.KeepWorkspace,
 		finalStatus:   &overallStatus,
-		networkName:   deps.NetworkName,
-	}
-
-	// Register Docker network cleanup FIRST (LIFO = runs LAST).
-	// The network must be torn down after both the Postgres and Maven containers
-	// are stopped; registering first ensures it is the last item executed.
-	if deps.NetworkCleanup != nil {
-		reg.Register(deps.NetworkCleanup)
-		cs.networkRegistered = true
 	}
 
 	// appendCleanupAndBuild runs cleanup eagerly, appends the cleanup StepResult
@@ -503,14 +503,37 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	}
 
 	// --- Step 4: Start container ---
+	// Create the Docker network lazily here — ONLY when the flow reaches this step.
+	// Early failures (preflight, clone, engine-guard, overlay) never create a network.
+	// LIFO order: register network cleanup FIRST so it runs LAST (after containers stop).
+	activeNetworkName := ""
+	if deps.NetworkFactory != nil {
+		netName, netCleanup, netErr := deps.NetworkFactory(ctx)
+		if netErr != nil {
+			return fail("container-start", "failed to create Docker network", netErr)
+		}
+		activeNetworkName = netName
+		cs.networkName = netName
+		// Register network cleanup FIRST (LIFO = runs LAST), before the container
+		// cleanup that will be registered below. This ensures the network is removed
+		// after both the Postgres container and any Maven containers are gone.
+		reg.Register(netCleanup)
+		cs.networkRegistered = true
+		log.Info("docker network created", "network", activeNetworkName)
+		// Propagate network name to the Maven runner if it supports lazy injection.
+		if nn, ok := deps.Maven.(networkNamer); ok {
+			nn.SetNetworkName(activeNetworkName)
+		}
+	}
+
 	log.Info("step.start", "step", "container-start",
 		"image", deps.DBProvider.Image(),
-		"network", deps.NetworkName,
+		"network", activeNetworkName,
 	)
 	notify(deps, "container-start", false, false)
 	t0 = time.Now()
 	containerProvider := deps.DBProvider.ContainerProvider()
-	coords, err := containerProvider.Start(ctx)
+	coords, err := containerProvider.Start(ctx, activeNetworkName)
 	if err != nil {
 		return fail("container-start", "failed to start ephemeral Postgres container", err)
 	}
@@ -542,8 +565,8 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 			pgAlias, coords.AliasPort,
 			coords.DBName, coords.User,
 		)
-		if deps.NetworkName != "" {
-			containerTrace += fmt.Sprintf("\nnetwork %s", deps.NetworkName)
+		if activeNetworkName != "" {
+			containerTrace += fmt.Sprintf("\nnetwork %s", activeNetworkName)
 		}
 		passWithTrace("container-start", time.Since(t0), containerTrace)
 	}
@@ -751,7 +774,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	log.Info("step.start", "step", maven.GoalSync,
 		"goal", maven.GoalSync,
 		"mvn_cmd", buildRedactedMvnCmd(maven.GoalSync, syncParamList),
-		"network", deps.NetworkName,
+		"network", activeNetworkName,
 	)
 	notify(deps, maven.GoalSync, false, false)
 	t0 = time.Now()
@@ -787,7 +810,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		"goal", maven.GoalRollback,
 		"tag", firstTag,
 		"mvn_cmd", buildRedactedMvnCmd(maven.GoalRollback, rollbackParamList),
-		"network", deps.NetworkName,
+		"network", activeNetworkName,
 	)
 	notify(deps, maven.GoalRollback, false, false)
 	t0 = time.Now()

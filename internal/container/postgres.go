@@ -23,19 +23,17 @@ const (
 // PostgresProvider implements domain.ContainerProvider for an ephemeral postgres:17.4 container.
 // testcontainers-go handles Ryuk-based cleanup automatically.
 //
-// When networkName is non-empty, the container joins that user-defined Docker network
-// and registers itself with the alias "postgres" so the Maven container can reach it
-// at postgres:5432 from within the same network.
+// The Docker network name is provided at Start time (not at construction), so the
+// provider can be constructed before the network exists and the network is created lazily.
 type PostgresProvider struct {
-	container   testcontainers.Container
-	networkName string // Docker network to join; empty means host networking only.
+	container testcontainers.Container
 }
 
 // NewPostgresProvider returns a PostgresProvider ready to Start.
-// Pass "" for networkName to use the default host-only setup (no Docker network).
-// Pass a non-empty network name (from NewNetwork) to join that network with alias "postgres".
-func NewPostgresProvider(networkName string) *PostgresProvider {
-	return &PostgresProvider{networkName: networkName}
+// The Docker network name is passed to Start when the network exists; pass "" to Start
+// for host-only networking (no Docker network alias).
+func NewPostgresProvider() *PostgresProvider {
+	return &PostgresProvider{}
 }
 
 // postgresNetworkAlias is the in-network alias for the Postgres container.
@@ -45,15 +43,16 @@ const postgresNetworkAlias = "postgres"
 // Start launches an ephemeral postgres:17.4 container on a random free host port
 // and waits until Postgres logs that it is ready to accept connections.
 //
-// When the provider was created with a non-empty networkName, the container also
-// joins that user-defined Docker network with alias "postgres" so it is reachable
-// at postgres:5432 from within the network. The returned ContainerCoords will
-// have both Host:Port (admin/host path) and AliasHost:AliasPort (network path) set.
+// networkName is the Docker network to join; pass "" for host-only networking.
+// When non-empty, the container joins that user-defined Docker network with alias
+// "postgres" so Maven containers running in the same network can reach Postgres at
+// postgres:5432. The returned ContainerCoords will have both Host:Port (admin/host
+// path) and AliasHost:AliasPort (network path) set.
 //
 // Role creation (lb_<schema>, GRANT-target roles) is NOT done here — it is done
 // by the orchestrator after schema extraction from the archetype DDL, so the set
 // of roles is determined from the actual repo contents, not hardcoded.
-func (p *PostgresProvider) Start(ctx context.Context) (domain.ContainerCoords, error) {
+func (p *PostgresProvider) Start(ctx context.Context, networkName string) (domain.ContainerCoords, error) {
 	req := testcontainers.ContainerRequest{
 		Image:        postgresImage,
 		ExposedPorts: []string{"5432/tcp"},
@@ -70,10 +69,10 @@ func (p *PostgresProvider) Start(ctx context.Context) (domain.ContainerCoords, e
 
 	// When a Docker network is configured, join it with the "postgres" alias so
 	// Maven containers running in the same network can reach Postgres at postgres:5432.
-	if p.networkName != "" {
-		req.Networks = []string{p.networkName}
+	if networkName != "" {
+		req.Networks = []string{networkName}
 		req.NetworkAliases = map[string][]string{
-			p.networkName: {postgresNetworkAlias},
+			networkName: {postgresNetworkAlias},
 		}
 	}
 
@@ -108,7 +107,7 @@ func (p *PostgresProvider) Start(ctx context.Context) (domain.ContainerCoords, e
 	}
 
 	// Populate alias coords when a Docker network is in use.
-	if p.networkName != "" {
+	if networkName != "" {
 		coords.AliasHost = postgresNetworkAlias
 		coords.AliasPort = 5432
 	}

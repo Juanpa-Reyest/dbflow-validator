@@ -83,17 +83,13 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	}
 	t.Logf("fixture local SQLInput prepared at %s with N0001_TA_VALIDATOR_RUN.sql", fixtureLocalSQLInput)
 
-	// Create a per-run Docker network so Postgres and Maven containers share alias resolution.
+	// The Docker network is created lazily inside the orchestrator at container-start
+	// via NetworkFactory. No pre-run network creation needed here.
 	ctx := context.Background()
-	_, networkName, networkCleanup, netErr := container.NewNetwork(ctx)
-	if netErr != nil {
-		t.Fatalf("create docker network: %v", netErr)
-	}
-	t.Cleanup(func() { _ = networkCleanup() })
-	t.Logf("docker network: %s", networkName)
 
 	// Wire real adapters.
-	pgContainerProvider := container.NewPostgresProvider(networkName)
+	// PostgresProvider receives the network name at Start time (lazy); no network name at construction.
+	pgContainerProvider := container.NewPostgresProvider()
 	dbEng, err := engine.ProviderFor(engine.EnginePostgres)
 	if err != nil {
 		t.Fatalf("engine provider: %v", err)
@@ -117,11 +113,10 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	}
 	t.Logf("using embedded Maven repo cache: %s", mavenRepoCachePath)
 
-	// Maven runs inside a container on the shared Docker network.
-	// Host Maven/JVM are NOT used — this validates the zero-friction distribution path.
+	// Maven container runner — network name injected lazily via SetNetworkName at container-start.
 	containerRunner := maven.NewContainerRunner(
 		maven.DefaultImage,
-		networkName,
+		"", // network name set lazily by orchestrator via SetNetworkName
 		mavenRepoCachePath,
 		os.Getuid(),
 		os.Getgid(),
@@ -151,15 +146,23 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 	dualLogger := logging.NewDualSink(os.Stderr, logFile, slog.LevelInfo)
 
 	deps := orchestrator.Deps{
-		Preflight:          preflight.New(nil),
-		Cloner:             fakeCloner,
-		DBProvider:         realDBProvider,
-		Patcher:            liquibase.NewPatcher(),
-		Engine:             engine.NewDetector(),
-		Tags:               &liquibase.ChangelogResolver{},
-		Maven:              containerRunner,
-		NetworkCleanup:     networkCleanup,
-		NetworkName:        networkName,
+		Preflight:   preflight.New(nil),
+		Cloner:      fakeCloner,
+		DBProvider:  realDBProvider,
+		Patcher:     liquibase.NewPatcher(),
+		Engine:      engine.NewDetector(),
+		Tags:        &liquibase.ChangelogResolver{},
+		Maven:       containerRunner,
+		// NetworkFactory creates the Docker network lazily at container-start.
+		// The orchestrator injects the network name into containerRunner via SetNetworkName.
+		NetworkFactory: func(fctx context.Context) (string, func() error, error) {
+			_, name, cleanup, err := container.NewNetwork(fctx)
+			if err != nil {
+				return "", nil, err
+			}
+			t.Logf("docker network created lazily: %s", name)
+			return name, cleanup, nil
+		},
 		MavenRepoCachePath: mavenRepoCachePath,
 		// Wire the real Overlayer so fixture SQLInput is copied into the clone's
 		// src/main/resources/SQLInput/ before sync.
@@ -384,9 +387,11 @@ func TestEndToEnd_FailurePath(t *testing.T) {
 		Maven: &fakeMavenRunner{
 			syncResult: domain.StepResult{Status: domain.StepStatusFailed, Error: "BUILD FAILURE"},
 		},
-		NetworkCleanup: func() error { networkCleanupCount++; return nil },
-		RunDir:         runDir,
-		KeepWorkspace:  false,
+		NetworkFactory: func(_ context.Context) (string, func() error, error) {
+			return "test-net", func() error { networkCleanupCount++; return nil }, nil
+		},
+		RunDir:        runDir,
+		KeepWorkspace: false,
 	}
 
 	cfg := config.Config{

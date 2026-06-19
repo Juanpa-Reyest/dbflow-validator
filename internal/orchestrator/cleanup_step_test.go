@@ -61,11 +61,15 @@ func buildCleanupTestDeps(
 			syncResult:     domain.StepResult{Status: domain.StepStatusPassed},
 			rollbackResult: domain.StepResult{Status: domain.StepStatusPassed},
 		},
-		NetworkCleanup: func() error {
-			cleaned++
-			return networkCleanupErr
+		// NetworkFactory creates the network lazily at container-start.
+		// The cleanup closure tracks invocations so tests can assert teardown.
+		NetworkFactory: func(_ context.Context) (string, func() error, error) {
+			cleanup := func() error {
+				cleaned++
+				return networkCleanupErr
+			}
+			return "test-net", cleanup, nil
 		},
-		NetworkName:     "test-net",
 		ReadinessPolicy: &fastPolicy,
 		RunDir:          runDir,
 		KeepWorkspace:   false,

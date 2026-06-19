@@ -11,6 +11,12 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/orchestrator"
 )
 
+// noopNetworkFactory is a NetworkFactory that creates a fake no-op network
+// (no real Docker call), for tests that need network registration without Docker.
+func noopNetworkFactory(_ context.Context) (string, func() error, error) {
+	return "test-net", func() error { return nil }, nil
+}
+
 // TestOrchestrator_FailedStatus_CloneMovedToWorkspace verifies that on FAILED
 // the clone is moved to <runDir>/workspace/ and does not remain at its original location.
 func TestOrchestrator_FailedStatus_CloneMovedToWorkspace(t *testing.T) {
@@ -93,9 +99,12 @@ func TestOrchestrator_ContainerAndNetwork_AlwaysCleanedUp(t *testing.T) {
 			},
 		},
 	}
-	deps.NetworkCleanup = func() error {
-		networkCleanupCount++
-		return nil
+	deps.NetworkFactory = func(_ context.Context) (string, func() error, error) {
+		cleanup := func() error {
+			networkCleanupCount++
+			return nil
+		}
+		return "test-net", cleanup, nil
 	}
 
 	// Force failure to test worst-case cleanup.
