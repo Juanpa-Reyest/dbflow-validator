@@ -369,11 +369,21 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	)
 	notify(deps, "clone", false, false)
 	t0 = time.Now()
+	// Create the temp dir BEFORE cloning and register its unconditional removal
+	// immediately. This guarantees the dir is always torn down even when Clone
+	// returns an error (which previously caused the dir to leak).
+	// On success the workspace-conditional closure (registered below) also runs
+	// first (LIFO) and either moves or removes the directory; the safety closure
+	// then runs os.RemoveAll on the already-gone path which is a no-op.
+	destDir := tempCloneDir()
+	reg.Register(func() error {
+		return os.RemoveAll(destDir)
+	})
 	cloneRoot, err := deps.Cloner.Clone(ctx, domain.CloneOptions{
 		RepoURL: cfg.RepoURL,
 		Branch:  cfg.BaseBranch,
 		Token:   cfg.Token,
-		DestDir: tempCloneDir(),
+		DestDir: destDir,
 	})
 	if err != nil {
 		return fail("clone", "git clone failed", err)
