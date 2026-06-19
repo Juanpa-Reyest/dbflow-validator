@@ -120,6 +120,98 @@ func notify(deps Deps, name string, done, failed bool) {
 	}
 }
 
+// cleanupState tracks workspace and resource state needed to build the cleanup
+// StepResult trace. Fields are set incrementally as the run progresses; the
+// runCleanupStep helper reads them after reg.RunAll() completes.
+type cleanupState struct {
+	// cloneRoot is the ephemeral clone directory path. Empty when clone has not
+	// yet been registered (pre-clone early exits).
+	cloneRoot string
+	// runDir mirrors deps.RunDir; used to show the retention path in the trace.
+	runDir string
+	// keepWorkspace mirrors deps.KeepWorkspace.
+	keepWorkspace bool
+	// finalStatus points to the overallStatus variable inside Run so that the
+	// cleanup function can read the terminal value at call time.
+	finalStatus *domain.Status
+	// networkName is the Docker network name for the trace label.
+	networkName string
+}
+
+// runCleanupStep executes all registered cleanup functions eagerly, then builds
+// and returns a domain.StepResult that describes what was torn down.
+//
+// The returned step is always status PASSED unless one or more cleanup functions
+// returned an error, in which case its status is FAILED and Error is populated.
+// In either case the step does NOT alter the overall validation verdict —
+// callers must treat cleanup errors as warning-level.
+//
+// The registry is idempotent: the deferred RunAll call in Run will be a no-op.
+func runCleanupStep(reg *CleanupRegistry, cs cleanupState, started time.Time) domain.StepResult {
+	t0 := time.Now()
+	errs := reg.RunAll()
+
+	status := domain.StepStatusPassed
+	errMsg := ""
+	if len(errs) > 0 {
+		status = domain.StepStatusFailed
+		msgs := make([]string, len(errs))
+		for i, e := range errs {
+			msgs[i] = e.Error()
+		}
+		errMsg = strings.Join(msgs, "; ")
+	}
+
+	trace := buildCleanupTrace(cs, errs)
+
+	return domain.StepResult{
+		Name:       "cleanup",
+		Status:     status,
+		Duration:   time.Since(t0),
+		DurationMs: time.Since(t0).Milliseconds(),
+		Trace:      trace,
+		Error:      errMsg,
+	}
+}
+
+// buildCleanupTrace builds the human-readable trace for the cleanup step.
+// It describes what was torn down and what was retained (workspace on FAILED runs).
+func buildCleanupTrace(cs cleanupState, errs []error) string {
+	var lines []string
+
+	// Container line — always registered after clone, described generally here.
+	// The teardown errors (if any) are already captured in errMsg; here we note
+	// the intent for each resource.
+	lines = append(lines, "contenedor postgres    eliminado")
+	lines = append(lines, "red docker             eliminada")
+
+	// Workspace line depends on the terminal status and keepWorkspace flag.
+	if cs.cloneRoot == "" {
+		// Clone never ran (very early failure) — no workspace to report.
+		lines = append(lines, "workspace (clon)       n/a  (no clone registered)")
+	} else if cs.finalStatus != nil && *cs.finalStatus == domain.StatusPassed && !cs.keepWorkspace {
+		lines = append(lines, "workspace (clon)       eliminado")
+	} else {
+		// Retained: FAILED, ABORTED, USAGE_ERROR, or KeepWorkspace=true.
+		retainPath := strings.TrimRight(cs.runDir, "/") + "/workspace/"
+		if cs.runDir == "" {
+			retainPath = "(run dir unavailable — clone removed as fallback)"
+		}
+		lines = append(lines, fmt.Sprintf("workspace (clon)       RETENIDO → %s", retainPath))
+	}
+
+	// Teardown errors summary (if any).
+	if len(errs) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, "ADVERTENCIA — teardown errors:")
+		for _, e := range errs {
+			lines = append(lines, "  "+e.Error())
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
 // Run executes the full linear validation flow:
 //  1. Preflight host-binary checks
 //  2. Git clone into 0700 temp dir
@@ -130,18 +222,29 @@ func notify(deps Deps, name string, done, failed bool) {
 //  7. Run dbflow:sync
 //  8. Resolve first-tag from master-changelog
 //  9. Run dbflow:rollback
-//  10. Report
+//  10. Cleanup (eager run before report) — captured as a visible step
+//  11. Report
 //
 // Cleanup (container stop + temp dir removal) is registered eagerly and runs
-// on ALL exit paths via deferred registry.RunAll().
+// on ALL exit paths. The cleanup step is appended to steps BEFORE the report
+// is built so it appears in the summary table and DETALLE blocks.
+// The deferred RunAll() is kept as a SIGINT-safety net; it is a no-op when
+// cleanup has already run eagerly.
 func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	log := logger(deps)
 	started := time.Now()
 	reg := NewCleanupRegistry()
+
+	// Safety net: if the process receives SIGINT/SIGTERM before the eager cleanup
+	// runs (or if Run panics), the deferred registry still executes cleanup.
+	// RunAll is idempotent — the deferred call is a no-op when eager cleanup
+	// already ran. Cleanup errors from the safety-net path are logged only
+	// (the structured cleanup step may not be rendered in that case, which is
+	// acceptable per the design spec).
 	defer func() {
 		errs := reg.RunAll()
 		for _, e := range errs {
-			log.Warn("cleanup error", "err", e)
+			log.Warn("cleanup error (safety-net defer)", "err", e)
 		}
 	}()
 
@@ -163,6 +266,27 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	var steps []domain.StepResult
 	overallStatus := domain.StatusPassed
 
+	// cs accumulates workspace/resource metadata for the cleanup step trace.
+	// Fields are filled in as the run progresses.
+	cs := cleanupState{
+		runDir:        deps.RunDir,
+		keepWorkspace: deps.KeepWorkspace,
+		finalStatus:   &overallStatus,
+		networkName:   deps.NetworkName,
+	}
+
+	// appendCleanupAndBuild runs cleanup eagerly, appends the cleanup StepResult
+	// to steps, notifies OnStep, and returns the final RunReport.
+	// All exit paths (success, failure, early exit) must call this instead of
+	// buildReport directly to guarantee the cleanup step is always included.
+	appendCleanupAndBuild := func() domain.RunReport {
+		notify(deps, "cleanup", false, false)
+		cleanupStep := runCleanupStep(reg, cs, started)
+		notify(deps, "cleanup", true, cleanupStep.Status != domain.StepStatusPassed)
+		steps = append(steps, cleanupStep)
+		return buildReport(started, cfg, overallStatus, steps)
+	}
+
 	fail := func(name string, msg string, err error) domain.RunReport {
 		if err != nil {
 			msg = fmt.Sprintf("%s: %v", msg, err)
@@ -175,7 +299,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 			Error:  msg,
 		})
 		overallStatus = domain.StatusFailed
-		return buildReport(started, cfg, overallStatus, steps)
+		return appendCleanupAndBuild()
 	}
 
 	// failUsage signals a configuration/usage error (exit code 2).
@@ -192,7 +316,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 			Error:  msg,
 		})
 		overallStatus = domain.StatusUsageError
-		return buildReport(started, cfg, overallStatus, steps)
+		return appendCleanupAndBuild()
 	}
 
 	// passWithTrace records a passed step and populates StepResult.Trace with a
@@ -255,33 +379,34 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		return fail("clone", "git clone failed", err)
 	}
 	log.Debug("clone destination", "clone_root", cloneRoot)
+	// Record the clone root in cs so runCleanupStep can describe the workspace
+	// disposition in the cleanup trace.
+	cs.cloneRoot = cloneRoot
 	// Register status-conditional cleanup for the ephemeral clone directory.
 	//
-	// The closure captures &overallStatus and reads it at run time (inside deferred
-	// reg.RunAll()), which executes AFTER Run() has set overallStatus to its terminal
-	// value. This is the core of the status-conditional workspace retention:
+	// The closure captures cs (by value copy of the pointer fields) and reads
+	// *cs.finalStatus at run time, which reflects the terminal overallStatus.
+	// This is the core of the status-conditional workspace retention:
 	//
 	//   - PASSED and !KeepWorkspace → os.RemoveAll(cloneRoot) — normal success cleanup
 	//   - Any other outcome (FAILED, ABORTED, USAGE_ERROR) OR KeepWorkspace=true →
 	//     MoveWorkspace(cloneRoot, <runDir>/workspace/) — retain the clone for debugging
 	//
-	// When deps.RunDir is empty (run-dir creation failed / degraded mode), fall back
+	// When cs.runDir is empty (run-dir creation failed / degraded mode), fall back
 	// to unconditional removal to avoid leaking temp dirs.
-	finalStatus := &overallStatus
-	runDir := deps.RunDir
-	keepWorkspace := deps.KeepWorkspace
+	capturedCS := cs // snapshot after cloneRoot is set
 	reg.Register(func() error {
 		// Remove on success (unless keep-workspace requested) or when runDir is empty.
-		if *finalStatus == domain.StatusPassed && !keepWorkspace {
-			return os.RemoveAll(cloneRoot)
+		if capturedCS.finalStatus != nil && *capturedCS.finalStatus == domain.StatusPassed && !capturedCS.keepWorkspace {
+			return os.RemoveAll(capturedCS.cloneRoot)
 		}
-		if runDir == "" {
+		if capturedCS.runDir == "" {
 			// Degraded mode: run-dir not available, fall back to removal.
-			slog.Warn("run dir unavailable; removing clone dir (cannot retain workspace)", "cloneRoot", cloneRoot)
-			return os.RemoveAll(cloneRoot)
+			slog.Warn("run dir unavailable; removing clone dir (cannot retain workspace)", "cloneRoot", capturedCS.cloneRoot)
+			return os.RemoveAll(capturedCS.cloneRoot)
 		}
 		// Move the clone into <runDir>/workspace/ for post-mortem inspection.
-		return MoveWorkspace(cloneRoot, filepath.Join(runDir, "workspace"))
+		return MoveWorkspace(capturedCS.cloneRoot, filepath.Join(capturedCS.runDir, "workspace"))
 	})
 	{
 		cloneTrace := fmt.Sprintf(
@@ -608,7 +733,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	steps = append(steps, syncResult)
 	if syncResult.Status != domain.StepStatusPassed {
 		overallStatus = domain.StatusFailed
-		return buildReport(started, cfg, overallStatus, steps)
+		return appendCleanupAndBuild()
 	}
 
 	// --- Step 8: First-tag resolution ---
@@ -646,7 +771,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		overallStatus = domain.StatusFailed
 	}
 
-	return buildReport(started, cfg, overallStatus, steps)
+	return appendCleanupAndBuild()
 }
 
 // syncParams returns the KV pairs for dbflow:sync.
