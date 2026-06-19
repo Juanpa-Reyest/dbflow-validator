@@ -1,30 +1,57 @@
 ## dbflow-validator — Cross-compile Makefile
 ##
 ## Targets:
+##   make vendor      — Fetch the plugin jar from GitHub Packages (no-op if already present)
 ##   make build       — Build for the current platform (output: dist/<binary>)
 ##   make build-all   — Cross-compile for linux-amd64, darwin-amd64, darwin-arm64, windows-amd64
 ##   make clean       — Remove the dist/ directory
 ##
 ## The binary embeds the vendored Maven repository (~110 MB).
 ## Set VERSION to override the injected build version (default: git describe or "dev").
+##
+## GH_TOKEN: a GitHub personal access token with read:packages scope.
+##   Required when the plugin jar is not already present locally (fresh clone).
+##   Not needed when the jar already exists (make vendor is a no-op in that case).
+##   Usage: GH_TOKEN=ghp_... make vendor
+##          GH_TOKEN=ghp_... make build
+##          GH_TOKEN=ghp_... make build-all
 
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-BINARY   := dbflow-validator
-PKG      := github.com/dbflow-validator/dbflow-validator/cmd/dbflow-validator
-LDFLAGS  := -X main.buildVersion=$(VERSION) -s -w
-DIST     := dist
+VERSION      ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+BINARY       := dbflow-validator
+PKG          := github.com/dbflow-validator/dbflow-validator/cmd/dbflow-validator
+LDFLAGS      := -X main.buildVersion=$(VERSION) -s -w
+DIST         := dist
 
-.PHONY: build build-all clean
+PLUGIN_JAR   := internal/embedrepo/mvn-vendor/repository/com/gs/ftt/coe-ds/relational-db-release-manager-plugin/0.0.1/relational-db-release-manager-plugin-0.0.1.jar
+PACKAGES_URL := https://maven.pkg.github.com/Juanpa-Reyest/dbflow-validator/com/gs/ftt/coe-ds/relational-db-release-manager-plugin/0.0.1/relational-db-release-manager-plugin-0.0.1.jar
+
+.PHONY: build build-all clean vendor
+
+## vendor — Fetch the plugin jar from GitHub Packages if not already present.
+## Requires GH_TOKEN (read:packages) when the jar is missing.
+## This is a no-op when the jar already exists locally.
+vendor:
+	@if [ -f "$(PLUGIN_JAR)" ]; then \
+		echo "vendor: plugin jar already present — skipping download"; \
+	else \
+		echo "vendor: downloading plugin jar from GitHub Packages..."; \
+		mkdir -p "$(dir $(PLUGIN_JAR))"; \
+		curl -fsSL \
+			-H "Authorization: Bearer $$GH_TOKEN" \
+			-o "$(PLUGIN_JAR)" \
+			"$(PACKAGES_URL)"; \
+		echo "vendor: downloaded $(PLUGIN_JAR)"; \
+	fi
 
 ## build — Build for the current host platform.
-build:
+build: vendor
 	@mkdir -p $(DIST)
 	go build -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY) ./cmd/dbflow-validator/
 	@echo "Built $(DIST)/$(BINARY) (version=$(VERSION))"
 
 ## build-all — Build the native binary AND cross-compile for all supported platforms.
 ## Includes `build` so the suffixless dist/dbflow-validator never goes stale.
-build-all: build build-linux-amd64 build-darwin-amd64 build-darwin-arm64 build-windows-amd64
+build-all: vendor build build-linux-amd64 build-darwin-amd64 build-darwin-arm64 build-windows-amd64
 
 build-linux-amd64:
 	@mkdir -p $(DIST)

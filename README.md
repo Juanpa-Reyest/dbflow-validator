@@ -9,6 +9,21 @@ it created is cleaned up automatically.
 
 ---
 
+## Download
+
+Go to the [Releases page](https://github.com/Juanpa-Reyest/dbflow-validator/releases) and download the binary for your OS:
+
+| OS | File |
+|----|------|
+| Linux (x86-64) | `dbflow-validator-linux-amd64` |
+| macOS Apple Silicon (M1+) | `dbflow-validator-darwin-arm64` |
+| macOS Intel | `dbflow-validator-darwin-amd64` |
+| Windows (x86-64) | `dbflow-validator-windows-amd64.exe` |
+
+Optionally verify the download against `SHA256SUMS.txt` (also attached to each release), then follow the per-OS run steps below.
+
+---
+
 ## What you need (only two things)
 
 | You need | Why |
@@ -249,10 +264,21 @@ The first run downloads the build image and extracts the embedded Maven reposito
 ## For maintainers (building & distributing)
 
 > Developers don't need this section — it's for whoever builds and ships the binaries.
+> Full publishing instructions (GitHub Packages, cutting releases, fresh-clone setup) are in [`docs/PUBLISHING.md`](docs/PUBLISHING.md).
 
 Requires **Go 1.25+**. The binary is ~118 MB because the vendored Maven repository
 (the `dbflow` plugin + PostgreSQL driver) is embedded inside it, so the distributed
 file is fully self-contained.
+
+The plugin jar (`relational-db-release-manager-plugin-0.0.1.jar`) is NOT committed to git.
+It is fetched from GitHub Packages at build time. On a fresh clone, run:
+
+```bash
+export GH_TOKEN=ghp_your_token_with_read_packages
+make vendor       # downloads the jar (no-op if already present)
+```
+
+Then build:
 
 ```bash
 make build        # build for THIS machine            → dist/dbflow-validator

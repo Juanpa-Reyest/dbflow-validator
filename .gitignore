@@ -7,3 +7,6 @@ dbflow-validator-runs/
 
 # Built binary (local build via `go build` or `make build`).
 /dbflow-validator
+
+# Plugin jar (>100MB) — fetched from GitHub Packages at build time, not committed
+internal/embedrepo/mvn-vendor/repository/com/gs/ftt/coe-ds/relational-db-release-manager-plugin/0.0.1/relational-db-release-manager-plugin-0.0.1.jar
