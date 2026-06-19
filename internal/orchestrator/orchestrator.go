@@ -136,6 +136,14 @@ type cleanupState struct {
 	finalStatus *domain.Status
 	// networkName is the Docker network name for the trace label.
 	networkName string
+	// containerRegistered is true when the container Stop closure has been
+	// registered with the CleanupRegistry. False on early exits (before
+	// container-start) — the trace shows n/a rather than "eliminado".
+	containerRegistered bool
+	// networkRegistered is true when the network cleanup closure has been
+	// registered with the CleanupRegistry. False when deps.NetworkCleanup is nil
+	// or when the run exits before the network registration step.
+	networkRegistered bool
 }
 
 // runCleanupStep executes all registered cleanup functions eagerly, then builds
@@ -176,14 +184,25 @@ func runCleanupStep(reg *CleanupRegistry, cs cleanupState, started time.Time) do
 
 // buildCleanupTrace builds the human-readable trace for the cleanup step.
 // It describes what was torn down and what was retained (workspace on FAILED runs).
+// Resources that were never created (early-failure runs) are reported as n/a.
 func buildCleanupTrace(cs cleanupState, errs []error) string {
 	var lines []string
 
-	// Container line — always registered after clone, described generally here.
-	// The teardown errors (if any) are already captured in errMsg; here we note
-	// the intent for each resource.
-	lines = append(lines, "contenedor postgres    eliminado")
-	lines = append(lines, "red docker             eliminada")
+	// Container line — show "eliminado" only when the container was actually started
+	// and its Stop closure registered. On early failures (before container-start)
+	// show n/a to avoid misleading "eliminado" for a container that never existed.
+	if cs.containerRegistered {
+		lines = append(lines, "contenedor postgres    eliminado")
+	} else {
+		lines = append(lines, "contenedor postgres    n/a  (no se creó)")
+	}
+
+	// Network line — same conditional logic as the container.
+	if cs.networkRegistered {
+		lines = append(lines, "red docker             eliminada")
+	} else {
+		lines = append(lines, "red docker             n/a  (no se creó)")
+	}
 
 	// Workspace line depends on the terminal status and keepWorkspace flag.
 	if cs.cloneRoot == "" {
@@ -256,23 +275,25 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		"network", deps.NetworkName,
 	)
 
-	// Register Docker network cleanup FIRST (LIFO = runs LAST).
-	// The network must be torn down after both the Postgres and Maven containers
-	// are stopped; registering first ensures it is the last item executed.
-	if deps.NetworkCleanup != nil {
-		reg.Register(deps.NetworkCleanup)
-	}
-
 	var steps []domain.StepResult
 	overallStatus := domain.StatusPassed
 
 	// cs accumulates workspace/resource metadata for the cleanup step trace.
-	// Fields are filled in as the run progresses.
+	// Fields are filled in as the run progresses. networkRegistered is set here
+	// (before network registration) so it is available for the trace builder.
 	cs := cleanupState{
 		runDir:        deps.RunDir,
 		keepWorkspace: deps.KeepWorkspace,
 		finalStatus:   &overallStatus,
 		networkName:   deps.NetworkName,
+	}
+
+	// Register Docker network cleanup FIRST (LIFO = runs LAST).
+	// The network must be torn down after both the Postgres and Maven containers
+	// are stopped; registering first ensures it is the last item executed.
+	if deps.NetworkCleanup != nil {
+		reg.Register(deps.NetworkCleanup)
+		cs.networkRegistered = true
 	}
 
 	// appendCleanupAndBuild runs cleanup eagerly, appends the cleanup StepResult
@@ -493,10 +514,12 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	if err != nil {
 		return fail("container-start", "failed to start ephemeral Postgres container", err)
 	}
-	// Register cleanup for the container.
+	// Register cleanup for the container and mark it as created in cs so that
+	// buildCleanupTrace can report "eliminado" vs "n/a (no se creó)" accurately.
 	reg.Register(func() error {
 		return containerProvider.Stop(context.Background())
 	})
+	cs.containerRegistered = true
 	// Log the connection alias (no credentials) so engineers can see which network
 	// alias the Maven container will use to reach Postgres.
 	pgAlias := coords.AliasHost
