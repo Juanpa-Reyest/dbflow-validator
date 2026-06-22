@@ -22,8 +22,13 @@ PKG          := github.com/dbflow-validator/dbflow-validator/cmd/dbflow-validato
 LDFLAGS      := -X main.buildVersion=$(VERSION) -s -w
 DIST         := dist
 
-PLUGIN_JAR   := internal/embedrepo/mvn-vendor/repository/com/gs/ftt/coe-ds/relational-db-release-manager-plugin/0.0.1/relational-db-release-manager-plugin-0.0.1.jar
-PACKAGES_URL := https://maven.pkg.github.com/Juanpa-Reyest/dbflow-validator/com/gs/ftt/coe-ds/relational-db-release-manager-plugin/0.0.1/relational-db-release-manager-plugin-0.0.1.jar
+# PLUGIN_VERSION is the single source of truth for the embedded plugin version.
+# Bump it here (or override per-invocation: PLUGIN_VERSION=0.0.2 make build) and
+# every path/URL below follows automatically.
+PLUGIN_VERSION ?= 0.0.1
+PLUGIN_DIR   := internal/embedrepo/mvn-vendor/repository/com/gs/ftt/coe-ds/relational-db-release-manager-plugin/$(PLUGIN_VERSION)
+PLUGIN_JAR   := $(PLUGIN_DIR)/relational-db-release-manager-plugin-$(PLUGIN_VERSION).jar
+PACKAGES_URL := https://maven.pkg.github.com/Juanpa-Reyest/dbflow-validator/com/gs/ftt/coe-ds/relational-db-release-manager-plugin/$(PLUGIN_VERSION)/relational-db-release-manager-plugin-$(PLUGIN_VERSION).jar
 
 .PHONY: build build-all clean vendor
 
