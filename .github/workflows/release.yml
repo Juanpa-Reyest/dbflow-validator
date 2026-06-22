@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Fetch plugin jar from GitHub Packages
+        run: make vendor
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build all binaries
+        run: make build-all
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum dbflow-validator-linux-amd64 dbflow-validator-darwin-amd64 dbflow-validator-darwin-arm64 dbflow-validator-windows-amd64.exe > SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/dbflow-validator-linux-amd64 \
+            dist/dbflow-validator-darwin-amd64 \
+            dist/dbflow-validator-darwin-arm64 \
+            dist/dbflow-validator-windows-amd64.exe \
+            dist/SHA256SUMS.txt \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Download the binary for your OS (linux-amd64, darwin-arm64, darwin-amd64, or windows-amd64.exe), make it executable, and run it. Requires Docker and Git."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
