@@ -25,6 +25,7 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/container"
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
 	"github.com/dbflow-validator/dbflow-validator/internal/embedrepo"
+	"github.com/dbflow-validator/dbflow-validator/internal/embedvalidator"
 	"github.com/dbflow-validator/dbflow-validator/internal/engine"
 	"github.com/dbflow-validator/dbflow-validator/internal/git"
 	"github.com/dbflow-validator/dbflow-validator/internal/liquibase"
@@ -35,6 +36,7 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/preflight"
 	"github.com/dbflow-validator/dbflow-validator/internal/report"
 	"github.com/dbflow-validator/dbflow-validator/internal/rundir"
+	"github.com/dbflow-validator/dbflow-validator/internal/rulesvalidator"
 )
 
 // buildVersion is injected at link time via -ldflags "-X main.buildVersion=<version>".
@@ -227,6 +229,12 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 	}
 
 	uid, gid := hostUIDGID()
+
+	// Extract embedded validator JAR to the per-version user cache directory.
+	// On failure, a warning is logged and the validator is left nil so the
+	// orchestrator falls back to the no-op seam (matches Maven-cache contract).
+	validatorJARPath := resolveEmbeddedValidatorJar()
+
 	// Build the Maven container runner with an empty network name — the orchestrator
 	// will call SetNetworkName on it after the network is created at container-start.
 	mavenRunner := maven.NewContainerRunner(maven.DefaultImage, "", mavenRepoCachePath, uid, gid)
@@ -258,6 +266,15 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		// "starting" events print "  ▸ <name> …" and "done" events print the result.
 		// This keeps the console quiet (no slog logfmt) while still showing activity.
 		OnStep: consoleProgressPrinter(os.Stdout),
+	}
+
+	// Wire the concrete PreSyncValidator when the JAR was extracted successfully.
+	// When validatorJARPath is empty (extraction failure), deps.PreSyncValidator
+	// remains nil and the orchestrator uses NoOpPreSyncValidator (always passes).
+	if validatorJARPath != "" {
+		deps.PreSyncValidator = rulesvalidator.New(
+			maven.DefaultImage, validatorJARPath, uid, gid, nil,
+		)
 	}
 
 	// --- 6. Run orchestration ---
@@ -434,4 +451,23 @@ func consoleProgressPrinter(w io.Writer) func(orchestrator.StepEvent) {
 		}
 		fmt.Fprintf(w, "  ▸ %s … %s\n", e.Name, result)
 	}
+}
+
+// resolveEmbeddedValidatorJar extracts the embedded SQL rules validator JAR to
+// the per-version user cache directory and returns the extraction path.
+//
+// Cache location: ~/.cache/dbflow-validator/<buildVersion>/validator/validator.jar
+//
+// On failure, a warning is logged and "" is returned.  The orchestrator will
+// then use the NoOpPreSyncValidator (always passes), which mirrors the Maven-cache
+// degradation contract.  Central CI is the backstop for real validation.
+func resolveEmbeddedValidatorJar() string {
+	cacheRoot := defaultCacheRoot()
+	jarPath, err := embedvalidator.EnsureExtracted(cacheRoot, buildVersion)
+	if err != nil {
+		slog.Warn("failed to extract embedded validator JAR; pre-sync validation will be skipped",
+			"err", err, "cacheRoot", cacheRoot, "version", buildVersion)
+		return ""
+	}
+	return jarPath
 }
