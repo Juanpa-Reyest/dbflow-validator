@@ -72,9 +72,10 @@ func New(image, jarPath string, uid, gid int, runner ContainerRunner) *Container
 //  4. Read and parse the JSON report file from the host filesystem.
 //  5. Apply the gate decision.
 //
-// Returns nil only when globalSummary.status == "PASS".
+// Returns nil when globalSummary.status is "PASS" or "INFO".
+// "INFO" means no applicable rules matched — informational, no actionable violations.
 // Returns a wrapped ErrNoReport if the JSON report file is absent or unparseable (fail-closed).
-// Returns a hard error for FAIL, ERROR, or any non-PASS status.
+// Returns a hard error for FAIL, ERROR, or any other non-passing status.
 // Returns ErrRulesetMissing (wrapped) if the ruleset YAML is absent from cloneRoot.
 // Exit code of the container is intentionally ignored.
 func (v *ContainerValidator) ValidatePreSync(ctx context.Context, cloneRoot string) error {

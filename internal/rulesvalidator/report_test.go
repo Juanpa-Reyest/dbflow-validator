@@ -22,12 +22,53 @@ func fixture(t *testing.T, name string) string {
 // Decide
 // ---------------------------------------------------------------------------
 
+// TestDecide_TableDriven covers all gate outcomes in one place.
+func TestDecide_TableDriven(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  string
+		wantNil bool
+	}{
+		{"PASS returns nil", "PASS", true},
+		{"INFO returns nil — informational no-violation status", "INFO", true},
+		{"FAIL returns error", "FAIL", false},
+		{"ERROR returns error", "ERROR", false},
+		{"unknown returns error (fail-safe)", "UNKNOWN", false},
+		{"empty status returns error (fail-safe)", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rpt := rulesvalidator.Report{
+				GlobalSummary: rulesvalidator.GlobalSummary{Status: tt.status},
+			}
+			err := rulesvalidator.Decide(rpt)
+			if tt.wantNil && err != nil {
+				t.Errorf("Decide(%q): expected nil, got %v", tt.status, err)
+			}
+			if !tt.wantNil && err == nil {
+				t.Errorf("Decide(%q): expected error, got nil", tt.status)
+			}
+		})
+	}
+}
+
 func TestDecide_Pass_ReturnsNil(t *testing.T) {
 	rpt := rulesvalidator.Report{
 		GlobalSummary: rulesvalidator.GlobalSummary{Status: "PASS", Score: 100.0},
 	}
 	if err := rulesvalidator.Decide(rpt); err != nil {
 		t.Errorf("Decide(PASS): expected nil, got %v", err)
+	}
+}
+
+// TestDecide_INFO_ReturnsNil asserts that INFO is treated as a passing gate.
+// INFO means no applicable rules matched (informational only, no violations).
+func TestDecide_INFO_ReturnsNil(t *testing.T) {
+	rpt := rulesvalidator.Report{
+		GlobalSummary: rulesvalidator.GlobalSummary{Status: "INFO"},
+	}
+	if err := rulesvalidator.Decide(rpt); err != nil {
+		t.Errorf("Decide(INFO): expected nil (passing gate), got %v", err)
 	}
 }
 

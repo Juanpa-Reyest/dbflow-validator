@@ -49,19 +49,23 @@ func ReadReportFile(path string) (Report, error) {
 //
 // Gate:
 //   - "PASS" → nil (pipeline continues)
+//   - "INFO" → nil (pipeline continues; INFO means no applicable rules matched —
+//     informational only, no actionable violations)
 //   - "FAIL", "ERROR", any other value, or empty → non-nil error (abort)
 //
-// The JAR exit code is NEVER consulted. Returning nil ONLY when status is
-// explicitly "PASS" ensures that any novel status value defaults to abort
-// (fail-safe).
+// The JAR exit code is NEVER consulted. Returning nil only when the status is
+// explicitly "PASS" or "INFO" ensures that any novel status value defaults to
+// abort (fail-safe / fail-closed).
 //
-// The error message produced for non-PASS outcomes is actionable: it includes
+// The error message produced for non-passing outcomes is actionable: it includes
 // the status, the violationsBySeverity counts, and the names of offending files.
 func Decide(rpt Report) error {
-	if rpt.GlobalSummary.Status == "PASS" {
+	switch rpt.GlobalSummary.Status {
+	case "PASS", "INFO":
 		return nil
+	default:
+		return errors.New(formatViolations(rpt))
 	}
-	return errors.New(formatViolations(rpt))
 }
 
 // formatViolations builds a human-readable summary of a non-PASS report.
