@@ -1,0 +1,35 @@
+[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.cli.ScriptValidationCommand - No se especificó directorio de salida. El reporte HTML no será generado.
+[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.cli.ScriptValidationCommand - Archivo de configuración: /missing/validation-rules.yaml
+[main] ERROR com.gs.ftt.coe_ds.script_validator_postgre.cli.ScriptValidationCommand - Error al cargar la configuración de reglas.
+java.io.FileNotFoundException: /missing/validation-rules.yaml (No such file or directory)
+	at java.io.FileInputStream.open0(Native Method)
+	at java.io.FileInputStream.open(FileInputStream.java:216)
+	at java.io.FileInputStream.<init>(FileInputStream.java:157)
+[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.service.impl.CliServiceImpl - {
+  "globalSummary" : {
+    "totalFiles" : 0,
+    "summaryMetrics" : {
+      "evaluated" : 0,
+      "passed" : 0,
+      "violated" : 0,
+      "coverage" : 0.0,
+      "violationsBySeverity" : {
+        "blocker" : 0,
+        "critical" : 0,
+        "major" : 0,
+        "minor" : 0,
+        "info" : 0
+      }
+    },
+    "status" : "ERROR",
+    "ruleSetMetadata" : null,
+    "analyzerMetadata" : {
+      "analyzerVersion" : "1.0",
+      "executionStartTimestamp" : "23/06/2026 18:30:00",
+      "executionEndTimestamp" : "23/06/2026 18:30:00",
+      "executionDuration" : "0.021"
+    },
+    "score" : 0.0
+  },
+  "fileReport" : [ ]
+}
