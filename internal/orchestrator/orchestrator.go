@@ -756,7 +756,7 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		if isNoOp {
 			preSyncNote = "SQL rules validator not enabled (no-op seam); step is a pass-through"
 		} else {
-			preSyncNote = fmt.Sprintf("SQL rules validator ran against %s — passed", cloneRoot)
+			preSyncNote = fmt.Sprintf("SQL rules validator ran against %s — status PASS", cloneRoot)
 		}
 		passWithTrace("pre-sync-validate", time.Since(t0), preSyncNote)
 	}

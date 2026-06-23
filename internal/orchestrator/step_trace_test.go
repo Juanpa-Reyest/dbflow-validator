@@ -407,6 +407,31 @@ func TestStepTrace_PreSyncValidate_ContainsNoOpNote(t *testing.T) {
 	}
 }
 
+// TestStepTrace_PreSyncValidate_ActiveValidator_PassNoteContainsStatusPASS asserts
+// that when an active (non-no-op) PreSyncValidator is wired and returns nil, the
+// trace note contains "status PASS" and the cloneRoot path.
+func TestStepTrace_PreSyncValidate_ActiveValidator_PassNoteContainsStatusPASS(t *testing.T) {
+	deps, cfg := makeStepTraceDeps(t, "")
+
+	// Wire a fake PreSyncValidator that always passes (err=nil).
+	// fakePreSyncValidator is declared in orchestrator_test.go.
+	deps.PreSyncValidator = &fakePreSyncValidator{}
+
+	rpt := orchestrator.Run(context.Background(), deps, cfg)
+	if rpt.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %v", rpt.Status, stepNames(rpt))
+	}
+
+	s := findStep(t, rpt, "pre-sync-validate")
+	lc := strings.ToLower(s.Trace)
+	if strings.Contains(lc, "no-op") || strings.Contains(lc, "not enabled") {
+		t.Errorf("active-validator trace should NOT mention no-op; trace:\n%s", s.Trace)
+	}
+	if !strings.Contains(s.Trace, "PASS") {
+		t.Errorf("active-validator trace should contain 'PASS'; trace:\n%s", s.Trace)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // first-tag
 // ---------------------------------------------------------------------------
