@@ -14,6 +14,19 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
 )
 
+// Option is a functional option for ContainerValidator.
+type Option func(*ContainerValidator)
+
+// WithValidatorOut sets the writer that receives the validator container's
+// combined stdout+stderr. When nil or not provided, output is discarded (the
+// default — consistent with the behaviour before this option was added).
+// Wire this to execution.log in production to capture evidence of every run.
+func WithValidatorOut(w io.Writer) Option {
+	return func(v *ContainerValidator) {
+		v.validatorOut = w
+	}
+}
+
 // ContainerRunner is the interface satisfied by anything that can run the
 // validator container and return the combined stdout+stderr output.
 // It is a narrow seam so unit tests can inject a fake without Docker.
@@ -25,14 +38,18 @@ type ContainerRunner interface {
 //  1. Locating the ruleset YAML and SQLInput directory under cloneRoot.
 //  2. Building a ValidatorContainerRequest.
 //  3. Running the JAR container and capturing the combined log.
-//  4. Extracting and parsing the JSON report.
-//  5. Applying the gate decision.
+//  4. Writing the captured log to validatorOut (when set) before gate decisions.
+//  5. Extracting and parsing the JSON report.
+//  6. Applying the gate decision.
 type ContainerValidator struct {
-	image      string
-	jarPath    string
-	uid        int
-	gid        int
-	runner     ContainerRunner
+	image        string
+	jarPath      string
+	uid          int
+	gid          int
+	runner       ContainerRunner
+	// validatorOut receives the container's combined stdout+stderr on every run,
+	// regardless of outcome. Nil means discard (default, backward-compatible).
+	validatorOut io.Writer
 }
 
 // Ensure ContainerValidator satisfies domain.PreSyncValidator at compile time.
@@ -46,20 +63,25 @@ var _ domain.PreSyncValidator = (*ContainerValidator)(nil)
 //   - uid/gid: Host UID and GID for --user (pass 0 to skip on non-Linux).
 //   - runner:  ContainerRunner implementation.  Pass nil to use the default
 //              testcontainers-based runner.
-func New(image, jarPath string, uid, gid int, runner ContainerRunner) *ContainerValidator {
+//   - opts:    Optional functional options (e.g. WithValidatorOut).
+func New(image, jarPath string, uid, gid int, runner ContainerRunner, opts ...Option) *ContainerValidator {
 	if image == "" {
 		image = "maven:3.9-eclipse-temurin-21"
 	}
 	if runner == nil {
 		runner = &dockerRunner{}
 	}
-	return &ContainerValidator{
+	v := &ContainerValidator{
 		image:   image,
 		jarPath: jarPath,
 		uid:     uid,
 		gid:     gid,
 		runner:  runner,
 	}
+	for _, opt := range opts {
+		opt(v)
+	}
+	return v
 }
 
 // ValidatePreSync implements domain.PreSyncValidator.
@@ -89,9 +111,15 @@ func (v *ContainerValidator) ValidatePreSync(ctx context.Context, cloneRoot stri
 	req := BuildContainerRequest(v.image, v.jarPath, v.uid, v.gid, cloneRoot, paths)
 
 	// Step 3: Run the container.
-	// The string return is diagnostic log output; the actual report is a file.
-	if _, err := v.runner.RunValidator(ctx, req); err != nil {
-		return fmt.Errorf("pre-sync-validate: container execution: %w", err)
+	// The string return is the JAR's combined stdout+stderr (logger output).
+	// We capture it and write to validatorOut BEFORE any gate decision so that
+	// evidence is always recorded — even on failure paths.
+	containerLog, runErr := v.runner.RunValidator(ctx, req)
+	if v.validatorOut != nil && len(containerLog) > 0 {
+		_, _ = io.WriteString(v.validatorOut, containerLog)
+	}
+	if runErr != nil {
+		return fmt.Errorf("pre-sync-validate: container execution: %w", runErr)
 	}
 
 	// Step 4: Read JSON report file written by the JAR into the clone.

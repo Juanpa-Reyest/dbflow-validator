@@ -277,6 +277,10 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 	// here because extraction failure aborts the run above (fail-CLOSED gate).
 	deps.PreSyncValidator = rulesvalidator.New(
 		maven.DefaultImage, validatorJARPath, uid, gid, nil,
+		// Route the validator container's stdout/stderr to execution.log (same
+		// sink as Maven), so the JAR's output is always kept as evidence — on a
+		// passing run and, crucially, on a failing one for diagnosis.
+		rulesvalidator.WithValidatorOut(mavenOut),
 	)
 
 	// --- 6. Run orchestration ---

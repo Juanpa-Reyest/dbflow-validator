@@ -1,7 +1,9 @@
 package rulesvalidator_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +48,125 @@ func makeValidatorCloneRoot(t *testing.T) string {
 		t.Fatalf("mkdir SQLInput: %v", err)
 	}
 	return root
+}
+
+// ---------------------------------------------------------------------------
+// logCapturingRunner — test double for ValidatorOut capture tests
+// ---------------------------------------------------------------------------
+
+// logCapturingRunner simulates the JAR: it writes a JSON report to disk AND
+// returns a fixed log string, letting tests assert what lands in ValidatorOut.
+type logCapturingRunner struct {
+	reportJSON string
+	logOutput  string
+	err        error
+}
+
+func (r *logCapturingRunner) RunValidator(
+	_ context.Context,
+	req rulesvalidator.ValidatorContainerRequest,
+) (string, error) {
+	if r.err != nil {
+		return r.logOutput, r.err
+	}
+	// Write the report file, mirroring what the real JAR does.
+	var cloneRoot string
+	for _, b := range req.Binds {
+		parts := strings.SplitN(b, ":", 3)
+		if len(parts) >= 2 && parts[1] == "/work" {
+			cloneRoot = parts[0]
+			break
+		}
+	}
+	if cloneRoot == "" {
+		return r.logOutput, errors.New("logCapturingRunner: no /work bind found")
+	}
+	reportPath := rulesvalidator.ReportPath(cloneRoot)
+	if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
+		return r.logOutput, err
+	}
+	if err := os.WriteFile(reportPath, []byte(r.reportJSON), 0o644); err != nil {
+		return r.logOutput, err
+	}
+	return r.logOutput, nil
+}
+
+// ---------------------------------------------------------------------------
+// ValidatorOut capture tests (Change 2)
+// ---------------------------------------------------------------------------
+
+// TestContainerValidator_ValidatorOut_WritesOutputOnPass asserts that the JAR
+// log output is written to ValidatorOut even on a passing run.
+func TestContainerValidator_ValidatorOut_WritesOutputOnPass(t *testing.T) {
+	const jarLog = "[INFO] Validator started\n[INFO] No violations found.\n"
+	passJSON := fixtureJSON(t, "pass_report.json")
+
+	runner := &logCapturingRunner{reportJSON: passJSON, logOutput: jarLog}
+
+	var buf bytes.Buffer
+	v := rulesvalidator.New(
+		"maven:3.9-eclipse-temurin-21",
+		"/cache/validator.jar",
+		1000, 1000,
+		runner,
+		rulesvalidator.WithValidatorOut(&buf),
+	)
+
+	cloneRoot := makeValidatorCloneRootWithOutputReportDir(t)
+	if err := v.ValidatePreSync(context.Background(), cloneRoot); err != nil {
+		t.Fatalf("ValidatePreSync: unexpected error: %v", err)
+	}
+	if !strings.Contains(buf.String(), "[INFO] Validator started") {
+		t.Errorf("ValidatorOut missing JAR log on PASS; got: %q", buf.String())
+	}
+}
+
+// TestContainerValidator_ValidatorOut_WritesOutputOnFail asserts that the JAR
+// log output is captured in ValidatorOut even when the gate fails (write-then-decide).
+func TestContainerValidator_ValidatorOut_WritesOutputOnFail(t *testing.T) {
+	const jarLog = "[WARN] Violation found in N0001_DDL_TBL_BAD.sql\n"
+	failJSON := fixtureJSON(t, "fail_report.json")
+
+	runner := &logCapturingRunner{reportJSON: failJSON, logOutput: jarLog}
+
+	var buf bytes.Buffer
+	v := rulesvalidator.New(
+		"maven:3.9-eclipse-temurin-21",
+		"/cache/validator.jar",
+		1000, 1000,
+		runner,
+		rulesvalidator.WithValidatorOut(&buf),
+	)
+
+	cloneRoot := makeValidatorCloneRootWithOutputReportDir(t)
+	err := v.ValidatePreSync(context.Background(), cloneRoot)
+	if err == nil {
+		t.Fatal("ValidatePreSync(FAIL): expected error, got nil")
+	}
+	// The output must have been written BEFORE the gate decision.
+	if !strings.Contains(buf.String(), "[WARN] Violation found") {
+		t.Errorf("ValidatorOut missing JAR log on FAIL; got: %q", buf.String())
+	}
+}
+
+// TestContainerValidator_ValidatorOut_NilWriter_DoesNotPanic asserts that nil
+// ValidatorOut (the default) leaves existing behaviour unchanged.
+func TestContainerValidator_ValidatorOut_NilWriter_DoesNotPanic(t *testing.T) {
+	passJSON := fixtureJSON(t, "pass_report.json")
+	runner := &logCapturingRunner{reportJSON: passJSON, logOutput: "some log\n"}
+
+	// No WithValidatorOut — default nil writer.
+	v := rulesvalidator.New(
+		"maven:3.9-eclipse-temurin-21",
+		"/cache/validator.jar",
+		1000, 1000,
+		runner,
+	)
+
+	cloneRoot := makeValidatorCloneRootWithOutputReportDir(t)
+	if err := v.ValidatePreSync(context.Background(), cloneRoot); err != nil {
+		t.Errorf("ValidatePreSync with nil ValidatorOut: unexpected error: %v", err)
+	}
 }
 
 // Pass/Fail/MissingReport unit tests for the file-based flow are in report_file_test.go
