@@ -4,108 +4,45 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
 
-// ErrNoReport is returned by ExtractReport when the combined container log
-// does not contain a parseable JSON report from the validator JAR.
-var ErrNoReport = errors.New("rulesvalidator: no valid JSON report found in container output")
+// ErrNoReport is returned when the validator JSON report is absent or unparseable.
+// Callers must treat this as a hard abort (fail-closed: cannot prove PASS).
+var ErrNoReport = errors.New("rulesvalidator: no valid JSON report found")
 
-// ExtractReport locates and parses the JSON report embedded in the combined
-// container output (stdout+stderr).
-//
-// The JAR emits the JSON via slf4j at INFO level with the prefix:
-//
-//	[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.service.impl.CliServiceImpl - {
-//
-// The approach:
-//  1. Find the "globalSummary" substring.
-//  2. Walk backwards from that position to find the opening `{` that starts
-//     the top-level object (past the slf4j ` - ` separator).
-//  3. Walk forward counting brace depth (respecting string literals and
-//     escape sequences) until depth reaches zero — this gives the balanced span.
-//  4. Unmarshal the span into Report.
-//
-// Any failure (anchor not found, unbalanced braces, unmarshal error) returns
-// ErrNoReport so callers can treat it as a hard abort (cannot prove PASS).
-func ExtractReport(log string) (Report, error) {
-	// Step 1: find the anchor.
-	anchorIdx := strings.Index(log, `"globalSummary"`)
-	if anchorIdx < 0 {
-		return Report{}, fmt.Errorf("%w: anchor \"globalSummary\" not found", ErrNoReport)
-	}
+// outputReportRelPath is the path of the JSON report relative to the -output dir
+// that the JAR writes when invoked with the -output flag.
+const outputReportRelPath = "report/json/validation_report.json"
 
-	// Step 2: walk backwards from anchorIdx to find the top-level '{'.
-	// The slf4j line ends with " - {" before the JSON, so we look for
-	// the first '{' that precedes the anchor.
-	openBrace := -1
-	for i := anchorIdx - 1; i >= 0; i-- {
-		if log[i] == '{' {
-			openBrace = i
-			break
-		}
-	}
-	if openBrace < 0 {
-		return Report{}, fmt.Errorf("%w: opening brace not found before anchor", ErrNoReport)
-	}
+// outputDirRelPath is the path of the -output directory relative to cloneRoot.
+const outputDirRelPath = "src/main/resources/Validator/outputReport"
 
-	// Step 3: walk forward from openBrace counting brace depth.
-	jsonSpan := extractBalancedObject(log[openBrace:])
-	if jsonSpan == "" {
-		return Report{}, fmt.Errorf("%w: unbalanced braces in JSON span", ErrNoReport)
-	}
-
-	// Step 4: unmarshal.
-	var rpt Report
-	if err := json.Unmarshal([]byte(jsonSpan), &rpt); err != nil {
-		return Report{}, fmt.Errorf("%w: json unmarshal: %v", ErrNoReport, err)
-	}
-
-	return rpt, nil
+// ReportPath returns the absolute host-side path where the JAR writes the JSON
+// report when invoked with "-output <cloneRoot>/outputDirRelPath".
+func ReportPath(cloneRoot string) string {
+	return filepath.Join(cloneRoot, filepath.FromSlash(outputDirRelPath), filepath.FromSlash(outputReportRelPath))
 }
 
-// extractBalancedObject returns the shortest prefix of s that forms a balanced
-// JSON object (depth-zero after the opening '{').  Returns "" on failure.
-// Respects string literals (including escape sequences) so braces inside
-// strings are not counted.
-func extractBalancedObject(s string) string {
-	if len(s) == 0 || s[0] != '{' {
-		return ""
+// ReadReportFile reads and parses the clean JSON report file that the validator JAR
+// writes to disk when invoked with the -output flag.
+//
+// The file at path must contain pure JSON (no log prefixes, no ANTLR noise).
+// Any failure — file absent, unreadable, or invalid JSON — returns ErrNoReport
+// so callers fail-closed (cannot prove PASS without a parseable report).
+func ReadReportFile(path string) (Report, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Report{}, fmt.Errorf("%w: read report file %s: %v", ErrNoReport, path, err)
 	}
-
-	depth := 0
-	inString := false
-	escaped := false
-
-	for i, ch := range s {
-		if escaped {
-			escaped = false
-			continue
-		}
-		if ch == '\\' && inString {
-			escaped = true
-			continue
-		}
-		if ch == '"' {
-			inString = !inString
-			continue
-		}
-		if inString {
-			continue
-		}
-		switch ch {
-		case '{', '[':
-			depth++
-		case '}', ']':
-			depth--
-			if depth == 0 {
-				return s[:i+1]
-			}
-		}
+	var rpt Report
+	if err := json.Unmarshal(data, &rpt); err != nil {
+		return Report{}, fmt.Errorf("%w: json unmarshal %s: %v", ErrNoReport, path, err)
 	}
-
-	return ""
+	return rpt, nil
 }
 
 // Decide applies the gate rule to a parsed Report.
@@ -114,7 +51,7 @@ func extractBalancedObject(s string) string {
 //   - "PASS" → nil (pipeline continues)
 //   - "FAIL", "ERROR", any other value, or empty → non-nil error (abort)
 //
-// The JAR exit code is NEVER consulted.  Returning nil ONLY when status is
+// The JAR exit code is NEVER consulted. Returning nil ONLY when status is
 // explicitly "PASS" ensures that any novel status value defaults to abort
 // (fail-safe).
 //

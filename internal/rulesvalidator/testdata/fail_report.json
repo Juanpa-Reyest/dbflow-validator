@@ -1,22 +1,4 @@
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.cli.ScriptValidationCommand - No se especificó directorio de salida. El reporte HTML no será generado.
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.cli.ScriptValidationCommand - Archivo de configuración: /val_rules/RulesContracts/validation-rules.yaml
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.cli.ScriptValidationCommand - Directorio de scripts a validar: /repo_sql
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.config.RuleLoader - Validación de IDs de regla duplicados completada. No se encontraron duplicados.
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.config.RuleLoader - Validacion de 'severity_levels' (weight/penalty_factor) completada.
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.config.RuleLoader - Perfil de reglas cargado: CORE_MX_POSTGRES
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.config.RuleLoader - Reglas encontradas: 32
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.service.impl.CliServiceImpl - RuleLoader cargado exitosamente por CliServiceImpl.
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.service.impl.CliServiceImpl - Buscando archivos con extensiones [.sql] en /repo_sql
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.service.impl.CliServiceImpl - Se encontraron 1 archivos para validar.
-[] INFO com.gs.ftt.coe_ds.script_validator_postgre.service.impl.CliServiceImpl - --- Procesando archivo: N0001_DDL_TBL_BAD.sql ---
-[] WARN com.gs.ftt.coe_ds.script_validator_postgre.utils.AntlrContextValidator - Keyword 'BEGIN' en apply_if.contains no tiene un mapeo de contexto ANTLR definido.
-[] WARN com.gs.ftt.coe_ds.script_validator_postgre.utils.AntlrContextValidator - Keyword 'TYPE' en apply_if.contains no tiene un mapeo de contexto ANTLR definido.
-[] WARN com.gs.ftt.coe_ds.script_validator_postgre.utils.AntlrContextValidator - Keyword 'BEGIN' en apply_if.contains no tiene un mapeo de contexto ANTLR definido.
-[] INFO com.gs.ftt.coe_ds.script_validator_postgre.validators.ValidationOrchestrator - Orquestador ha agrupado reglas en 1 tipos de validadores.
-[] INFO com.gs.ftt.coe_ds.script_validator_postgre.validators.ValidationOrchestrator - Delegando 5 regla(s) al validador para el tipo: postgre
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.service.impl.ReportBuilderServiceImpl - Status global determinado como FAIL por no alcanzar el umbral de score global (5.9 < 100.0).
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.service.impl.CliServiceImpl - No se especificó directorio de salida. El reporte HTML/ZIP no será generado en disco.
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.service.impl.CliServiceImpl - {
+{
   "globalSummary" : {
     "totalFiles" : 1,
     "summaryMetrics" : {
@@ -39,7 +21,7 @@
       "version" : "1.0",
       "rulesConfigured" : 32,
       "codeRange" : "[1, 300]",
-      "sourceFilePath" : "/val_rules/RulesContracts/validation-rules.yaml",
+      "sourceFilePath" : "/work/src/main/resources/Validator/RulesContracts/validation-rules.yaml",
       "severityLevels" : {
         "blocker" : {
           "weight" : 32.0,

@@ -64,12 +64,19 @@ func New(image, jarPath string, uid, gid int, runner ContainerRunner) *Container
 
 // ValidatePreSync implements domain.PreSyncValidator.
 //
-// It runs the validator JAR in a container against the cloneRoot, parses the
-// JSON report embedded in the combined output, and applies the gate decision.
+// Flow:
+//  1. Locate ruleset YAML and SQLInput dir inside cloneRoot (fails fast on missing ruleset).
+//  2. Build container request (includes -output pointing inside the clone).
+//  3. Run the JAR container — the JAR writes the JSON report to
+//     <cloneRoot>/src/main/resources/Validator/outputReport/report/json/validation_report.json.
+//  4. Read and parse the JSON report file from the host filesystem.
+//  5. Apply the gate decision.
 //
 // Returns nil only when globalSummary.status == "PASS".
-// Returns a hard error for FAIL, ERROR, unknown status, or missing/unparseable JSON.
+// Returns a wrapped ErrNoReport if the JSON report file is absent or unparseable (fail-closed).
+// Returns a hard error for FAIL, ERROR, or any non-PASS status.
 // Returns ErrRulesetMissing (wrapped) if the ruleset YAML is absent from cloneRoot.
+// Exit code of the container is intentionally ignored.
 func (v *ContainerValidator) ValidatePreSync(ctx context.Context, cloneRoot string) error {
 	// Step 1: Locate inputs (fails fast on missing ruleset).
 	paths, err := Locate(cloneRoot)
@@ -81,13 +88,14 @@ func (v *ContainerValidator) ValidatePreSync(ctx context.Context, cloneRoot stri
 	req := BuildContainerRequest(v.image, v.jarPath, v.uid, v.gid, cloneRoot, paths)
 
 	// Step 3: Run the container.
-	output, err := v.runner.RunValidator(ctx, req)
-	if err != nil {
+	// The string return is diagnostic log output; the actual report is a file.
+	if _, err := v.runner.RunValidator(ctx, req); err != nil {
 		return fmt.Errorf("pre-sync-validate: container execution: %w", err)
 	}
 
-	// Step 4: Extract JSON report.
-	rpt, err := ExtractReport(output)
+	// Step 4: Read JSON report file written by the JAR into the clone.
+	reportPath := ReportPath(cloneRoot)
+	rpt, err := ReadReportFile(reportPath)
 	if err != nil {
 		return fmt.Errorf("pre-sync-validate: %w", err)
 	}

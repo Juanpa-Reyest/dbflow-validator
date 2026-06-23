@@ -11,23 +11,26 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Unit tests — no Docker, no JAR, use a fake container runner
+// Unit tests — no Docker, no JAR
 // ---------------------------------------------------------------------------
 
-// fakeRunner is a test double for the container execution boundary.
-// It simulates the JAR container by returning canned output.
+// fakeRunner is a minimal ContainerRunner test double.
+// It returns a fixed error (or nil) and does NOT write any report file.
+// Used to test paths that do not reach the report-reading step
+// (e.g. container execution failure, missing ruleset).
 type fakeRunner struct {
-	output string
-	err    error
+	err error
 }
 
 func (f *fakeRunner) RunValidator(
 	_ context.Context,
-	req rulesvalidator.ValidatorContainerRequest,
+	_ rulesvalidator.ValidatorContainerRequest,
 ) (string, error) {
-	return f.output, f.err
+	return "", f.err
 }
 
+// makeValidatorCloneRoot creates a minimal clone root with the required directory
+// structure but WITHOUT the outputReport dir (the JAR creates it at runtime).
 func makeValidatorCloneRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -45,41 +48,9 @@ func makeValidatorCloneRoot(t *testing.T) string {
 	return root
 }
 
-func TestContainerValidator_Pass_ReturnsNil(t *testing.T) {
-	passLog := fixture(t, "pass.log")
-	runner := &fakeRunner{output: passLog}
-
-	v := rulesvalidator.New(
-		"maven:3.9-eclipse-temurin-21",
-		"/cache/validator.jar",
-		1000, 1000,
-		runner,
-	)
-
-	cloneRoot := makeValidatorCloneRoot(t)
-	err := v.ValidatePreSync(context.Background(), cloneRoot)
-	if err != nil {
-		t.Errorf("ValidatePreSync(PASS): expected nil, got %v", err)
-	}
-}
-
-func TestContainerValidator_Fail_ReturnsError(t *testing.T) {
-	failLog := fixture(t, "fail.log")
-	runner := &fakeRunner{output: failLog}
-
-	v := rulesvalidator.New(
-		"maven:3.9-eclipse-temurin-21",
-		"/cache/validator.jar",
-		1000, 1000,
-		runner,
-	)
-
-	cloneRoot := makeValidatorCloneRoot(t)
-	err := v.ValidatePreSync(context.Background(), cloneRoot)
-	if err == nil {
-		t.Error("ValidatePreSync(FAIL): expected non-nil error")
-	}
-}
+// Pass/Fail/MissingReport unit tests for the file-based flow are in report_file_test.go
+// (TestContainerValidator_FileBasedFlow_*). They use fileWritingRunner which simulates
+// the JAR writing the JSON report to disk.
 
 func TestContainerValidator_MissingRuleset_ReturnsErrRulesetMissing(t *testing.T) {
 	runner := &fakeRunner{}
@@ -102,8 +73,8 @@ func TestContainerValidator_MissingRuleset_ReturnsErrRulesetMissing(t *testing.T
 	}
 }
 
-func TestContainerValidator_NoJSONInOutput_ReturnsError(t *testing.T) {
-	runner := &fakeRunner{output: "just noise, no JSON here"}
+func TestContainerValidator_ContainerError_ReturnsError(t *testing.T) {
+	runner := &fakeRunner{err: os.ErrNotExist} // simulate Docker failure
 
 	v := rulesvalidator.New(
 		"maven:3.9-eclipse-temurin-21",
@@ -115,14 +86,13 @@ func TestContainerValidator_NoJSONInOutput_ReturnsError(t *testing.T) {
 	cloneRoot := makeValidatorCloneRoot(t)
 	err := v.ValidatePreSync(context.Background(), cloneRoot)
 	if err == nil {
-		t.Error("expected error when no JSON found in output")
+		t.Error("expected error when container execution fails")
 	}
 }
 
 func TestContainerValidator_ImplementsPreSyncValidator(t *testing.T) {
-	// This test verifies the interface compliance via compile-time assertion.
-	// The actual assertion is in validator.go (var _ domain.PreSyncValidator = ...).
-	// This test just ensures the type can be constructed and is non-nil.
+	// The compile-time assertion is in validator.go (var _ domain.PreSyncValidator = ...).
+	// This test ensures the type can be constructed and is non-nil.
 	runner := &fakeRunner{}
 	v := rulesvalidator.New(
 		"maven:3.9-eclipse-temurin-21",
@@ -203,11 +173,9 @@ func TestContainerValidator_Integration_Fail(t *testing.T) {
 	}
 }
 
-// findRealJAR returns the path to the embedded JAR (extracted to a temp cache).
+// findRealJAR returns the path to the embedded JAR.
 func findRealJAR(t *testing.T) string {
 	t.Helper()
-	// The real jar lives in the embedvalidator package.
-	// For integration tests, extract it to a temp dir.
 	import_path := filepath.Join(
 		"/home/juanpabloreyestorres/Documentos/Documentos/FTT/files/Sistema golf/db-scripts/v2/ai/workspaces/ws-ai-dbflow-validator/dbflow-validator",
 		"internal", "embedvalidator", "jar", "library-script-validator-postgresql.jar",
