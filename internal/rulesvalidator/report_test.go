@@ -79,14 +79,17 @@ func TestExtractReport_Fail_HasFileReport(t *testing.T) {
 	}
 }
 
-func TestExtractReport_Error_ReturnsErrorStatus(t *testing.T) {
+// TestExtractReport_Error_ReturnsErrNoReport asserts the real behavior:
+// when the JAR throws an exception (config error, missing -cf, etc.) it emits
+// NO globalSummary JSON — only a Java exception stack trace.
+// ExtractReport must return ErrNoReport, not a parsed report with status "ERROR".
+// This matches what verify confirmed via two live JAR runs (InvalidConfigurationException,
+// MismatchedInputException — both emitted zero JSON).
+func TestExtractReport_Error_ReturnsErrNoReport(t *testing.T) {
 	log := fixture(t, "error.log")
-	rpt, err := rulesvalidator.ExtractReport(log)
-	if err != nil {
-		t.Fatalf("ExtractReport(error.log): unexpected error: %v", err)
-	}
-	if rpt.GlobalSummary.Status != "ERROR" {
-		t.Errorf("status = %q, want ERROR", rpt.GlobalSummary.Status)
+	_, err := rulesvalidator.ExtractReport(log)
+	if !errors.Is(err, rulesvalidator.ErrNoReport) {
+		t.Errorf("ExtractReport(error.log): expected ErrNoReport for real no-JSON JAR error output, got: %v", err)
 	}
 }
 
@@ -137,9 +140,14 @@ func TestDecide_Fail_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestDecide_Error_ReturnsError asserts that Decide rejects a Report with status
+// "ERROR". In practice the real JAR never emits ERROR JSON (it throws exceptions
+// with no JSON output), but the gate must still treat ERROR as abort if such a
+// report were ever produced (belt-and-suspenders fail-safe).
 func TestDecide_Error_ReturnsError(t *testing.T) {
-	log := fixture(t, "error.log")
-	rpt, _ := rulesvalidator.ExtractReport(log)
+	rpt := rulesvalidator.Report{
+		GlobalSummary: rulesvalidator.GlobalSummary{Status: "ERROR"},
+	}
 	if err := rulesvalidator.Decide(rpt); err == nil {
 		t.Error("Decide(ERROR): expected non-nil error, got nil")
 	}

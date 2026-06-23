@@ -1,35 +1,17 @@
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.cli.ScriptValidationCommand - No se especificó directorio de salida. El reporte HTML no será generado.
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.cli.ScriptValidationCommand - Archivo de configuración: /missing/validation-rules.yaml
-[main] ERROR com.gs.ftt.coe_ds.script_validator_postgre.cli.ScriptValidationCommand - Error al cargar la configuración de reglas.
-java.io.FileNotFoundException: /missing/validation-rules.yaml (No such file or directory)
-	at java.io.FileInputStream.open0(Native Method)
-	at java.io.FileInputStream.open(FileInputStream.java:216)
-	at java.io.FileInputStream.<init>(FileInputStream.java:157)
-[main] INFO com.gs.ftt.coe_ds.script_validator_postgre.service.impl.CliServiceImpl - {
-  "globalSummary" : {
-    "totalFiles" : 0,
-    "summaryMetrics" : {
-      "evaluated" : 0,
-      "passed" : 0,
-      "violated" : 0,
-      "coverage" : 0.0,
-      "violationsBySeverity" : {
-        "blocker" : 0,
-        "critical" : 0,
-        "major" : 0,
-        "minor" : 0,
-        "info" : 0
-      }
-    },
-    "status" : "ERROR",
-    "ruleSetMetadata" : null,
-    "analyzerMetadata" : {
-      "analyzerVersion" : "1.0",
-      "executionStartTimestamp" : "23/06/2026 18:30:00",
-      "executionEndTimestamp" : "23/06/2026 18:30:00",
-      "executionDuration" : "0.021"
-    },
-    "score" : 0.0
-  },
-  "fileReport" : [ ]
-}
+18:30:01.123 [main] INFO  com.gs.ftt.coe_ds.script_validator_postgre.cli.CliLauncher - Starting Script Validator PostgreSQL CLI
+18:30:01.456 [main] INFO  com.gs.ftt.coe_ds.script_validator_postgre.cli.ScriptValidationCommand - Archivo de configuración: /missing/path/validation-rules.yaml
+18:30:01.789 [main] ERROR com.gs.ftt.coe_ds.script_validator_postgre.cli.ScriptValidationCommand - Error al cargar la configuración de reglas de validación.
+com.gs.ftt.coe_ds.script_validator_postgre.exception.InvalidConfigurationException: No se pudo cargar el archivo de configuración: /missing/path/validation-rules.yaml
+	at com.gs.ftt.coe_ds.script_validator_postgre.service.impl.ConfigurationLoaderServiceImpl.loadConfiguration(ConfigurationLoaderServiceImpl.java:47)
+	at com.gs.ftt.coe_ds.script_validator_postgre.cli.ScriptValidationCommand.run(ScriptValidationCommand.java:89)
+	at picocli.CommandLine.executeUserObject(CommandLine.java:2041)
+	at picocli.CommandLine.access$1500(CommandLine.java:148)
+	at picocli.CommandLine.execute(CommandLine.java:2015)
+	at com.gs.ftt.coe_ds.script_validator_postgre.cli.CliLauncher.main(CliLauncher.java:24)
+Caused by: java.io.FileNotFoundException: /missing/path/validation-rules.yaml (No such file or directory)
+	at java.base/java.io.FileInputStream.open0(Native Method)
+	at java.base/java.io.FileInputStream.open(FileInputStream.java:216)
+	at java.base/java.io.FileInputStream.<init>(FileInputStream.java:157)
+	at com.gs.ftt.coe_ds.script_validator_postgre.service.impl.ConfigurationLoaderServiceImpl.loadConfiguration(ConfigurationLoaderServiceImpl.java:42)
+	... 5 more
+18:30:01.801 [main] INFO  com.gs.ftt.coe_ds.script_validator_postgre.cli.CliLauncher - Script Validator PostgreSQL CLI terminated with errors
