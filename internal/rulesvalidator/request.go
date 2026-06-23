@@ -32,17 +32,25 @@ const containerWorkDir = "/work"
 // containerJARPath is the fixed container-side path for the validator JAR.
 const containerJARPath = "/val/validator.jar"
 
+// containerOutputReportDir is the container-side path for the -output flag.
+// The JAR writes the JSON report at <containerOutputReportDir>/report/json/validation_report.json.
+// This path must be under /work (the cloneRoot mount) so the report lands on the host filesystem
+// and the workspace-retention logic can expose it as evidence on failure.
+const containerOutputReportDir = containerWorkDir + "/src/main/resources/Validator/outputReport"
+
 // BuildContainerRequest constructs the container request for a validator run.
 //
 // Container shape:
 //   - Image: the provided image (default: maven:3.9-eclipse-temurin-21).
 //   - NO Docker networks (the validator does not touch the database).
-//   - Cmd: java -jar /val/validator.jar validate -cf <rules_in_container> -sp <sqlinput_in_container>
-//   - Binds: cloneRoot:/work:ro, jarHostPath:/val/validator.jar:ro
+//   - Cmd: java -jar /val/validator.jar validate -cf <rules> -sp <sqlinput> -output <outputDir>
+//   - Binds: cloneRoot:/work:rw (rw so the container can write the JSON report), jarHostPath:/val/validator.jar:ro
 //   - Env: HOME=/tmp (suppress /root/.m2 permission warning)
 //   - User: UID:GID on Linux when UID != 0
 //
 // Container paths are derived by replacing the cloneRoot prefix with /work.
+// The -output flag points to <containerWorkDir>/src/main/resources/Validator/outputReport
+// so the report is written inside the clone and retained as evidence on failure.
 func BuildContainerRequest(
 	image, jarHostPath string,
 	uid, gid int,
@@ -63,10 +71,12 @@ func BuildContainerRequest(
 		"validate",
 		"-cf", containerRulesetPath,
 		"-sp", containerSQLInputPath,
+		"-output", containerOutputReportDir,
 	}
 
+	// cloneRoot is mounted read-write so the JAR can write the JSON report inside the clone.
 	binds := []string{
-		cloneRoot + ":" + containerWorkDir + ":ro",
+		cloneRoot + ":" + containerWorkDir + ":rw",
 		jarHostPath + ":" + containerJARPath + ":ro",
 	}
 

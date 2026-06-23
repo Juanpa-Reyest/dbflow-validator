@@ -82,7 +82,7 @@ func TestBuildContainerRequest_CmdContainsSQLInputFlag(t *testing.T) {
 	}
 }
 
-func TestBuildContainerRequest_BindsContainCloneRootRO(t *testing.T) {
+func TestBuildContainerRequest_BindsContainCloneRootMount(t *testing.T) {
 	req := buildTestRequest(t)
 	found := false
 	for _, b := range req.Binds {
