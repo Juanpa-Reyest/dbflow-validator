@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -112,6 +113,45 @@ func TestRun_MissingToken_ExitsWithCode2(t *testing.T) {
 	code := run(args, env)
 	if code != 2 {
 		t.Errorf("expected exit code 2 for missing token, got %d", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fail-closed validator JAR resolution (WARNING-2 fix)
+// ---------------------------------------------------------------------------
+
+// TestResolveValidatorJarWith_ExtractorError_ReturnsError asserts that when the
+// JAR extractor fails, resolveValidatorJarWith surfaces the error (fail-CLOSED).
+// Production wiring must treat this as a hard abort, not a silent no-op.
+func TestResolveValidatorJarWith_ExtractorError_ReturnsError(t *testing.T) {
+	sentinel := errors.New("simulated extraction failure")
+	failExtractor := func(cacheRoot, version string) (string, error) {
+		return "", sentinel
+	}
+
+	_, err := resolveValidatorJarWith(failExtractor, t.TempDir(), "test-version")
+	if err == nil {
+		t.Fatal("resolveValidatorJarWith: expected non-nil error on extraction failure (fail-CLOSED), got nil")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("resolveValidatorJarWith: error chain must wrap the extractor error; got: %v", err)
+	}
+}
+
+// TestResolveValidatorJarWith_Success_ReturnsPath asserts that when the extractor
+// succeeds, resolveValidatorJarWith returns the path and nil error.
+func TestResolveValidatorJarWith_Success_ReturnsPath(t *testing.T) {
+	wantPath := "/some/cache/validator.jar"
+	okExtractor := func(cacheRoot, version string) (string, error) {
+		return wantPath, nil
+	}
+
+	got, err := resolveValidatorJarWith(okExtractor, t.TempDir(), "test-version")
+	if err != nil {
+		t.Fatalf("resolveValidatorJarWith: unexpected error: %v", err)
+	}
+	if got != wantPath {
+		t.Errorf("resolveValidatorJarWith: got path %q, want %q", got, wantPath)
 	}
 }
 

@@ -231,9 +231,14 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 	uid, gid := hostUIDGID()
 
 	// Extract embedded validator JAR to the per-version user cache directory.
-	// On failure, a warning is logged and the validator is left nil so the
-	// orchestrator falls back to the no-op seam (matches Maven-cache contract).
-	validatorJARPath := resolveEmbeddedValidatorJar()
+	// Fail-CLOSED: if extraction fails the run aborts with a clear error rather
+	// than silently disabling the gate (which would violate the fail-safe principle).
+	validatorJARPath, jarErr := resolveEmbeddedValidatorJar()
+	if jarErr != nil {
+		fmt.Fprintf(os.Stderr, "dbflow-validator: cannot extract embedded validator JAR — aborting to preserve fail-safe gate: %v\n", jarErr)
+		fmt.Fprintf(os.Stderr, "dbflow-validator: tip: ensure the binary was built with //go:embed assets and the cache directory is writable (%s)\n", defaultCacheRoot())
+		return 2
+	}
 
 	// Build the Maven container runner with an empty network name — the orchestrator
 	// will call SetNetworkName on it after the network is created at container-start.
@@ -268,14 +273,11 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		OnStep: consoleProgressPrinter(os.Stdout),
 	}
 
-	// Wire the concrete PreSyncValidator when the JAR was extracted successfully.
-	// When validatorJARPath is empty (extraction failure), deps.PreSyncValidator
-	// remains nil and the orchestrator uses NoOpPreSyncValidator (always passes).
-	if validatorJARPath != "" {
-		deps.PreSyncValidator = rulesvalidator.New(
-			maven.DefaultImage, validatorJARPath, uid, gid, nil,
-		)
-	}
+	// Wire the concrete PreSyncValidator. validatorJARPath is guaranteed non-empty
+	// here because extraction failure aborts the run above (fail-CLOSED gate).
+	deps.PreSyncValidator = rulesvalidator.New(
+		maven.DefaultImage, validatorJARPath, uid, gid, nil,
+	)
 
 	// --- 6. Run orchestration ---
 	rpt := orchestrator.Run(ctx, deps, cfg)
@@ -453,21 +455,23 @@ func consoleProgressPrinter(w io.Writer) func(orchestrator.StepEvent) {
 	}
 }
 
+// resolveValidatorJarWith extracts the embedded SQL rules validator JAR using the
+// provided extractor function and returns the path or an error (fail-CLOSED).
+//
+// This is the testable core: production callers pass embedvalidator.EnsureExtracted;
+// tests can inject a stub that simulates extraction failure.
+func resolveValidatorJarWith(extractor func(cacheRoot, version string) (string, error), cacheRoot, version string) (string, error) {
+	return extractor(cacheRoot, version)
+}
+
 // resolveEmbeddedValidatorJar extracts the embedded SQL rules validator JAR to
 // the per-version user cache directory and returns the extraction path.
 //
 // Cache location: ~/.cache/dbflow-validator/<buildVersion>/validator/validator.jar
 //
-// On failure, a warning is logged and "" is returned.  The orchestrator will
-// then use the NoOpPreSyncValidator (always passes), which mirrors the Maven-cache
-// degradation contract.  Central CI is the backstop for real validation.
-func resolveEmbeddedValidatorJar() string {
+// On failure an error is returned — the caller MUST abort rather than silently
+// fall back to the no-op gate, preserving the fail-safe principle.
+func resolveEmbeddedValidatorJar() (string, error) {
 	cacheRoot := defaultCacheRoot()
-	jarPath, err := embedvalidator.EnsureExtracted(cacheRoot, buildVersion)
-	if err != nil {
-		slog.Warn("failed to extract embedded validator JAR; pre-sync validation will be skipped",
-			"err", err, "cacheRoot", cacheRoot, "version", buildVersion)
-		return ""
-	}
-	return jarPath
+	return resolveValidatorJarWith(embedvalidator.EnsureExtracted, cacheRoot, buildVersion)
 }
