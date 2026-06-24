@@ -113,7 +113,7 @@ func TestContainerValidator_ValidatorOut_WritesOutputOnPass(t *testing.T) {
 	)
 
 	cloneRoot := makeValidatorCloneRootWithOutputReportDir(t)
-	if err := v.ValidatePreSync(context.Background(), cloneRoot); err != nil {
+	if _, err := v.ValidatePreSync(context.Background(), cloneRoot); err != nil {
 		t.Fatalf("ValidatePreSync: unexpected error: %v", err)
 	}
 	if !strings.Contains(buf.String(), "[INFO] Validator started") {
@@ -139,7 +139,7 @@ func TestContainerValidator_ValidatorOut_WritesOutputOnFail(t *testing.T) {
 	)
 
 	cloneRoot := makeValidatorCloneRootWithOutputReportDir(t)
-	err := v.ValidatePreSync(context.Background(), cloneRoot)
+	_, err := v.ValidatePreSync(context.Background(), cloneRoot)
 	if err == nil {
 		t.Fatal("ValidatePreSync(FAIL): expected error, got nil")
 	}
@@ -164,7 +164,7 @@ func TestContainerValidator_ValidatorOut_NilWriter_DoesNotPanic(t *testing.T) {
 	)
 
 	cloneRoot := makeValidatorCloneRootWithOutputReportDir(t)
-	if err := v.ValidatePreSync(context.Background(), cloneRoot); err != nil {
+	if _, err := v.ValidatePreSync(context.Background(), cloneRoot); err != nil {
 		t.Errorf("ValidatePreSync with nil ValidatorOut: unexpected error: %v", err)
 	}
 }
@@ -185,7 +185,7 @@ func TestContainerValidator_MissingRuleset_ReturnsErrRulesetMissing(t *testing.T
 
 	// cloneRoot without the ruleset YAML.
 	cloneRoot := t.TempDir()
-	err := v.ValidatePreSync(context.Background(), cloneRoot)
+	_, err := v.ValidatePreSync(context.Background(), cloneRoot)
 	if err == nil {
 		t.Fatal("expected error for missing ruleset")
 	}
@@ -205,7 +205,7 @@ func TestContainerValidator_ContainerError_ReturnsError(t *testing.T) {
 	)
 
 	cloneRoot := makeValidatorCloneRoot(t)
-	err := v.ValidatePreSync(context.Background(), cloneRoot)
+	_, err := v.ValidatePreSync(context.Background(), cloneRoot)
 	if err == nil {
 		t.Error("expected error when container execution fails")
 	}
@@ -223,6 +223,63 @@ func TestContainerValidator_ImplementsPreSyncValidator(t *testing.T) {
 	)
 	if v == nil {
 		t.Fatal("New() returned nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ValidatePreSync return value — output string
+// ---------------------------------------------------------------------------
+
+// TestContainerValidator_ValidatePreSync_PassReturnsOutput asserts that on a
+// passing run the returned output string contains the container log.
+func TestContainerValidator_ValidatePreSync_PassReturnsOutput(t *testing.T) {
+	const jarLog = "[INFO] Validator started\n[INFO] No violations found.\n"
+	passJSON := fixtureJSON(t, "pass_report.json")
+
+	runner := &logCapturingRunner{reportJSON: passJSON, logOutput: jarLog}
+
+	v := rulesvalidator.New(
+		"maven:3.9-eclipse-temurin-21",
+		"/cache/validator.jar",
+		1000, 1000,
+		runner,
+	)
+
+	cloneRoot := makeValidatorCloneRootWithOutputReportDir(t)
+	output, err := v.ValidatePreSync(context.Background(), cloneRoot)
+	if err != nil {
+		t.Fatalf("ValidatePreSync: unexpected error: %v", err)
+	}
+	if !strings.Contains(output, "[INFO] Validator started") {
+		t.Errorf("ValidatePreSync(PASS) output missing JAR log; got: %q", output)
+	}
+}
+
+// TestContainerValidator_ValidatePreSync_FailReturnsOutputAndError asserts that
+// on a failing run the error is non-nil AND the returned output still contains
+// the container log (so failure evidence is always surfaced).
+func TestContainerValidator_ValidatePreSync_FailReturnsOutputAndError(t *testing.T) {
+	const jarLog = "[WARN] Violation found in N0001_DDL_TBL_BAD.sql\n"
+	failJSON := fixtureJSON(t, "fail_report.json")
+
+	runner := &logCapturingRunner{reportJSON: failJSON, logOutput: jarLog}
+
+	var buf bytes.Buffer
+	v := rulesvalidator.New(
+		"maven:3.9-eclipse-temurin-21",
+		"/cache/validator.jar",
+		1000, 1000,
+		runner,
+		rulesvalidator.WithValidatorOut(&buf),
+	)
+
+	cloneRoot := makeValidatorCloneRootWithOutputReportDir(t)
+	output, err := v.ValidatePreSync(context.Background(), cloneRoot)
+	if err == nil {
+		t.Fatal("ValidatePreSync(FAIL): expected error, got nil")
+	}
+	if !strings.Contains(output, "[WARN] Violation found") {
+		t.Errorf("ValidatePreSync(FAIL) output missing JAR log; got: %q", output)
 	}
 }
 
@@ -245,7 +302,7 @@ func TestContainerValidator_Integration_Pass(t *testing.T) {
 		nil, // nil runner → use real Docker
 	)
 
-	err := v.ValidatePreSync(context.Background(), cloneRoot)
+	_, err := v.ValidatePreSync(context.Background(), cloneRoot)
 	if err != nil {
 		t.Errorf("Integration PASS: expected nil error, got: %v", err)
 	}
@@ -288,7 +345,7 @@ func TestContainerValidator_Integration_Fail(t *testing.T) {
 		nil,
 	)
 
-	err = v.ValidatePreSync(context.Background(), cloneRoot)
+	_, err = v.ValidatePreSync(context.Background(), cloneRoot)
 	if err == nil {
 		t.Error("Integration FAIL: expected non-nil error for violating SQL")
 	}

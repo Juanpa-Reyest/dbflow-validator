@@ -230,7 +230,7 @@ func TestContainerValidator_FileBasedFlow_Pass_ReturnsNil(t *testing.T) {
 	)
 
 	cloneRoot := makeValidatorCloneRootWithOutputReportDir(t)
-	err := v.ValidatePreSync(context.Background(), cloneRoot)
+	_, err := v.ValidatePreSync(context.Background(), cloneRoot)
 	if err != nil {
 		t.Errorf("ValidatePreSync(file-based PASS): expected nil, got %v", err)
 	}
@@ -248,7 +248,7 @@ func TestContainerValidator_FileBasedFlow_Fail_ReturnsError(t *testing.T) {
 	)
 
 	cloneRoot := makeValidatorCloneRootWithOutputReportDir(t)
-	err := v.ValidatePreSync(context.Background(), cloneRoot)
+	_, err := v.ValidatePreSync(context.Background(), cloneRoot)
 	if err == nil {
 		t.Error("ValidatePreSync(file-based FAIL): expected non-nil error")
 	}
@@ -266,7 +266,7 @@ func TestContainerValidator_FileBasedFlow_MissingReport_ReturnsError(t *testing.
 	)
 
 	cloneRoot := makeValidatorCloneRootWithOutputReportDir(t)
-	err := v.ValidatePreSync(context.Background(), cloneRoot)
+	_, err := v.ValidatePreSync(context.Background(), cloneRoot)
 	if err == nil {
 		t.Error("ValidatePreSync(no report file): expected fail-closed error, got nil")
 	}

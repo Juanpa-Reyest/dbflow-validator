@@ -105,15 +105,22 @@ type MavenRunner interface {
 // The default (no-op) implementation is provided by NoOpPreSyncValidator.
 // Implementors receive the cloneRoot directory and must return a non-nil error to
 // abort the pipeline at the pre-sync-validate step.
+//
+// The returned output string is the combined stdout+stderr captured from the
+// container run. It is appended to the StepResult.Trace so that JAR evidence
+// always appears in execution.log — even on failure paths. An empty string is
+// valid (e.g. the no-op path produces no output).
 type PreSyncValidator interface {
-	ValidatePreSync(ctx context.Context, cloneRoot string) error
+	ValidatePreSync(ctx context.Context, cloneRoot string) (output string, err error)
 }
 
 // NoOpPreSyncValidator is the default PreSyncValidator that always passes.
 // Wire this when no external rules-validator is configured.
 type NoOpPreSyncValidator struct{}
 
-func (NoOpPreSyncValidator) ValidatePreSync(_ context.Context, _ string) error { return nil }
+func (NoOpPreSyncValidator) ValidatePreSync(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
 
 // Overlayer copies the developer's local SQLInput tree into the freshly-cloned
 // repository's SQLInput directory before sync.

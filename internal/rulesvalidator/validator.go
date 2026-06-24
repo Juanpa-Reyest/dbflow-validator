@@ -94,17 +94,20 @@ func New(image, jarPath string, uid, gid int, runner ContainerRunner, opts ...Op
 //  4. Read and parse the JSON report file from the host filesystem.
 //  5. Apply the gate decision.
 //
-// Returns nil when globalSummary.status is "PASS" or "INFO".
+// Returns ("", nil) when globalSummary.status is "PASS" or "INFO" and no output
+// was captured. Returns (containerLog, nil) when output was captured on a passing run.
 // "INFO" means no applicable rules matched — informational, no actionable violations.
+// Returns (containerLog, err) — always returning the captured log even on failure paths
+// so the orchestrator can surface JAR evidence in StepResult.Trace.
 // Returns a wrapped ErrNoReport if the JSON report file is absent or unparseable (fail-closed).
 // Returns a hard error for FAIL, ERROR, or any other non-passing status.
 // Returns ErrRulesetMissing (wrapped) if the ruleset YAML is absent from cloneRoot.
 // Exit code of the container is intentionally ignored.
-func (v *ContainerValidator) ValidatePreSync(ctx context.Context, cloneRoot string) error {
+func (v *ContainerValidator) ValidatePreSync(ctx context.Context, cloneRoot string) (string, error) {
 	// Step 1: Locate inputs (fails fast on missing ruleset).
 	paths, err := Locate(cloneRoot)
 	if err != nil {
-		return fmt.Errorf("pre-sync-validate: %w", err)
+		return "", fmt.Errorf("pre-sync-validate: %w", err)
 	}
 
 	// Step 2: Build container request.
@@ -112,29 +115,30 @@ func (v *ContainerValidator) ValidatePreSync(ctx context.Context, cloneRoot stri
 
 	// Step 3: Run the container.
 	// The string return is the JAR's combined stdout+stderr (logger output).
-	// We capture it and write to validatorOut BEFORE any gate decision so that
-	// evidence is always recorded — even on failure paths.
+	// Tee to validatorOut (the live sink, mirrors Maven's MavenOut tee) BEFORE
+	// any gate decision so evidence is always recorded — even on failure paths.
+	// ALSO return containerLog so the orchestrator can put it into StepResult.Trace.
 	containerLog, runErr := v.runner.RunValidator(ctx, req)
 	if v.validatorOut != nil && len(containerLog) > 0 {
 		_, _ = io.WriteString(v.validatorOut, containerLog)
 	}
 	if runErr != nil {
-		return fmt.Errorf("pre-sync-validate: container execution: %w", runErr)
+		return containerLog, fmt.Errorf("pre-sync-validate: container execution: %w", runErr)
 	}
 
 	// Step 4: Read JSON report file written by the JAR into the clone.
 	reportPath := ReportPath(cloneRoot)
 	rpt, err := ReadReportFile(reportPath)
 	if err != nil {
-		return fmt.Errorf("pre-sync-validate: %w", err)
+		return containerLog, fmt.Errorf("pre-sync-validate: %w", err)
 	}
 
 	// Step 5: Gate decision.
 	if err := Decide(rpt); err != nil {
-		return fmt.Errorf("pre-sync-validate: %w", err)
+		return containerLog, fmt.Errorf("pre-sync-validate: %w", err)
 	}
 
-	return nil
+	return containerLog, nil
 }
 
 // ---------------------------------------------------------------------------
