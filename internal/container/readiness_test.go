@@ -34,18 +34,47 @@ func TestWaitReady(t *testing.T) {
 		}
 
 		ctx := context.Background()
-		err := container.WaitReady(ctx, ping, policy, fakeClock, fakeSleep)
+		attempts, err := container.WaitReady(ctx, ping, policy, fakeClock, fakeSleep)
 		if err != nil {
 			t.Fatalf("expected nil error, got %v", err)
 		}
 		if calls != 3 {
 			t.Fatalf("expected 3 ping calls, got %d", calls)
 		}
+		// AC-9: attempt count must match the number of ping calls.
+		if attempts != 3 {
+			t.Errorf("expected attempts=3, got %d", attempts)
+		}
+	})
+
+	t.Run("succeeds on first attempt returns attempts=1", func(t *testing.T) {
+		ping := func(_ context.Context) error { return nil }
+
+		now := time.Now()
+		fakeClock := func() time.Time { return now }
+		fakeSleep := func(d time.Duration) {}
+
+		policy := container.RetryPolicy{
+			InitialInterval: 10 * time.Millisecond,
+			Multiplier:      1.5,
+			MaxInterval:     100 * time.Millisecond,
+			Deadline:        5 * time.Second,
+		}
+
+		ctx := context.Background()
+		attempts, err := container.WaitReady(ctx, ping, policy, fakeClock, fakeSleep)
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if attempts != 1 {
+			t.Errorf("expected attempts=1, got %d", attempts)
+		}
 	})
 
 	t.Run("deadline exceeded returns ErrReadinessTimeout", func(t *testing.T) {
+		const lastErrMsg = "still not ready"
 		ping := func(_ context.Context) error {
-			return errors.New("still not ready")
+			return errors.New(lastErrMsg)
 		}
 
 		// Fake clock that advances by 1 second each call — will quickly exhaust a 2s deadline.
@@ -65,9 +94,17 @@ func TestWaitReady(t *testing.T) {
 		}
 
 		ctx := context.Background()
-		err := container.WaitReady(ctx, ping, policy, fakeClock, fakeSleep)
+		attempts, err := container.WaitReady(ctx, ping, policy, fakeClock, fakeSleep)
 		if !errors.Is(err, domain.ErrReadinessTimeout) {
 			t.Fatalf("expected ErrReadinessTimeout, got %v", err)
+		}
+		// AC-10: real driver error must be included in the returned error string.
+		if !containsErrStr(err, lastErrMsg) {
+			t.Errorf("expected last error %q to appear in error message; got: %v", lastErrMsg, err)
+		}
+		// AC-9: attempts must be > 0.
+		if attempts == 0 {
+			t.Errorf("expected attempts > 0 on timeout, got %d", attempts)
 		}
 	})
 
@@ -94,9 +131,29 @@ func TestWaitReady(t *testing.T) {
 			Deadline:        30 * time.Second,
 		}
 
-		err := container.WaitReady(ctx, ping, policy, fakeClock, fakeSleep)
+		attempts, err := container.WaitReady(ctx, ping, policy, fakeClock, fakeSleep)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("expected context.Canceled, got %v", err)
 		}
+		if attempts == 0 {
+			t.Error("expected attempts > 0 when context is cancelled mid-retry")
+		}
 	})
+}
+
+// containsErrStr checks whether the error message of err contains substr.
+func containsErrStr(err error, substr string) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, errors.New(substr)) || (len(err.Error()) > 0 && errContainsStr(err.Error(), substr))
+}
+
+func errContainsStr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }

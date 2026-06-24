@@ -610,6 +610,9 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 			pgAlias, coords.AliasPort,
 			coords.DBName, coords.User,
 		)
+		if coords.ContainerID != "" {
+			containerTrace += fmt.Sprintf("\ncontainer_id  %s", coords.ContainerID)
+		}
 		if activeNetworkName != "" {
 			containerTrace += fmt.Sprintf("\nnetwork %s", activeNetworkName)
 		}
@@ -628,20 +631,27 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	if deps.ReadinessPolicy != nil {
 		policy = *deps.ReadinessPolicy
 	}
-	readinessErr := container.WaitReady(
+	readinessAttempts, readinessErr := container.WaitReady(
 		ctx,
 		pingFn,
 		policy,
 		time.Now,
 		func(d time.Duration) { time.Sleep(d) },
 	)
+	readinessElapsed := time.Since(t0)
 	if readinessErr != nil {
-		return fail("readiness-probe", "database readiness probe timed out", readinessErr)
+		readinessTrace := fmt.Sprintf(
+			"probe    SELECT 1\nattempts %d\nelapsed  %s\nerror    %v",
+			readinessAttempts,
+			readinessElapsed.Round(time.Millisecond),
+			readinessErr,
+		)
+		return failWithTrace("readiness-probe", "database readiness probe timed out", readinessErr, readinessTrace)
 	}
 	{
-		readinessElapsed := time.Since(t0)
 		readinessTrace := fmt.Sprintf(
-			"database accepting connections\nprobe elapsed: %s  (deadline: %s, initial interval: %s)",
+			"probe    SELECT 1\nresult   database accepting connections\nattempts %d\nelapsed  %s  (deadline: %s, initial interval: %s)",
+			readinessAttempts,
 			readinessElapsed.Round(time.Millisecond),
 			policy.Deadline,
 			policy.InitialInterval,

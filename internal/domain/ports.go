@@ -61,6 +61,10 @@ type ContainerCoords struct {
 	User      string
 	Password  string
 	DBName    string
+	// ContainerID is the short container ID (first 12 chars) returned by the
+	// container runtime after Start. Used to prove which container instance ran.
+	// Empty when the provider does not expose an ID (e.g. test fakes).
+	ContainerID string
 }
 
 // ContainerProvider starts and stops ephemeral database containers.

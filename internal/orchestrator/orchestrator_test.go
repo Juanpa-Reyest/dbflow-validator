@@ -814,3 +814,94 @@ func TestOrchestrator_CloneFailure_TraceIncludesCapturedOutput(t *testing.T) {
 		t.Errorf("clone failure Trace must contain captured output; trace: %q", cloneStep.Trace)
 	}
 }
+
+// ---- Readiness-probe trace tests (Slice 4 — AC-9, AC-10) ----
+
+// TestOrchestrator_ReadinessProbeTrace_ContainsAttempts verifies that on the
+// happy path the readiness-probe Trace contains the probe expression and attempt
+// count (AC-9).
+func TestOrchestrator_ReadinessProbeTrace_ContainsAttempts(t *testing.T) {
+	deps := happyDeps(t)
+	// pingErr=nil → WaitReady succeeds on the first attempt.
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	readinessStep := findStep(t, report, "readiness-probe")
+	// AC-9: Trace must contain the probe expression.
+	if !strings.Contains(readinessStep.Trace, "SELECT 1") {
+		t.Errorf("readiness-probe Trace must contain probe expression 'SELECT 1'; trace: %q", readinessStep.Trace)
+	}
+	// AC-9: Trace must contain attempt count.
+	if !strings.Contains(readinessStep.Trace, "attempts") {
+		t.Errorf("readiness-probe Trace must contain attempt count; trace: %q", readinessStep.Trace)
+	}
+}
+
+// TestOrchestrator_ReadinessProbeTrace_ContainsErrorOnTimeout verifies that when
+// the readiness probe times out, the step Trace contains the real driver error
+// message (AC-10).
+func TestOrchestrator_ReadinessProbeTrace_ContainsErrorOnTimeout(t *testing.T) {
+	const probeErrMsg = "dial tcp: connection refused"
+	deps := happyDeps(t)
+	deps.DBProvider = &fakeDatabaseProvider{
+		provider: &fakeContainerProvider{
+			coords: domain.ContainerCoords{Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", DBName: "db"},
+		},
+		pingErr: errors.New(probeErrMsg),
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusFailed {
+		t.Fatalf("expected FAILED, got %v", report.Status)
+	}
+
+	readinessStep := findStep(t, report, "readiness-probe")
+	if readinessStep.Status != domain.StepStatusFailed {
+		t.Errorf("expected readiness-probe FAILED, got %v", readinessStep.Status)
+	}
+	// AC-10: Real driver error must appear in the Trace.
+	if !strings.Contains(readinessStep.Trace, probeErrMsg) {
+		t.Errorf("readiness-probe Trace must contain real driver error %q; trace: %q", probeErrMsg, readinessStep.Trace)
+	}
+	// AC-9: Trace must contain attempt count.
+	if !strings.Contains(readinessStep.Trace, "attempts") {
+		t.Errorf("readiness-probe Trace must contain attempt count; trace: %q", readinessStep.Trace)
+	}
+}
+
+// TestOrchestrator_ContainerStart_TraceContainsContainerID verifies that when
+// ContainerCoords.ContainerID is set, the container-start step Trace includes it
+// (AC-8).
+func TestOrchestrator_ContainerStart_TraceContainsContainerID(t *testing.T) {
+	const fakeContainerID = "abc123def456"
+	deps := happyDeps(t)
+	deps.DBProvider = &fakeDatabaseProvider{
+		provider: &fakeContainerProvider{
+			coords: domain.ContainerCoords{
+				Host:        "127.0.0.1",
+				Port:        5432,
+				User:        "u",
+				Password:    "p",
+				DBName:      "db",
+				ContainerID: fakeContainerID,
+			},
+		},
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	containerStep := findStep(t, report, "container-start")
+	// AC-8: container-start Trace must include the container ID when provided.
+	if !strings.Contains(containerStep.Trace, fakeContainerID) {
+		t.Errorf("container-start Trace must contain ContainerID %q; trace: %q", fakeContainerID, containerStep.Trace)
+	}
+}
