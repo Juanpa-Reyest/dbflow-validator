@@ -665,20 +665,32 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	lbUsername := coords.User // default: throwaway admin user
 	lbPassword := coords.Password
 
+	// schemaTraces collects CommandTrace values from each provisioning sub-step
+	// so the orchestrator can render them into a single schema-setup Trace block.
+	var schemaTraces []domain.CommandTrace
+
 	if schemaName != "" {
 		lbUsername = liquibase.LbUsername(schemaName)
 		lbPassword = "lb_v4lid4t0r_pass" // throwaway password for lb user
 
 		// Create the lb_<schema> login role.
-		if err := container.CreateLbUser(ctx, adminDSN, lbUsername, lbPassword); err != nil {
-			return fail("schema-setup", "failed to create lb_<schema> user", err)
+		lbUserTrace, lbUserErr := container.CreateLbUser(ctx, adminDSN, lbUsername, lbPassword)
+		// Scrub the password from the trace before storing (defense-in-depth).
+		lbUserTrace.Command = domain.ScrubSecrets(lbUserTrace.Command, lbPassword)
+		lbUserTrace.Output = domain.ScrubSecrets(lbUserTrace.Output, lbPassword)
+		schemaTraces = append(schemaTraces, lbUserTrace)
+		if lbUserErr != nil {
+			return failWithTrace("schema-setup", "failed to create lb_<schema> user", lbUserErr,
+				buildSchemaSetupTrace(schemaName, lbUsername, schemaTraces, nil))
 		}
 
 		// Auto-create any GRANT-target roles found in the archetype DDL.
 		grantRoles, _ := liquibase.ExtractGrantTargetRolesFromArchetype(cloneRoot)
 		if len(grantRoles) > 0 {
-			if err := container.CreateRolesIfNotExist(ctx, adminDSN, grantRoles); err != nil {
-				return fail("schema-setup", "failed to create GRANT-target roles", err)
+			roleTraces, rolesErr := container.CreateRolesIfNotExist(ctx, adminDSN, grantRoles)
+			schemaTraces = append(schemaTraces, roleTraces...)
+			if rolesErr != nil {
+				return fail("schema-setup", "failed to create GRANT-target roles", rolesErr)
 			}
 		}
 
@@ -686,9 +698,11 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		// CONNECT is required to establish sessions; CREATE is required so the lb
 		// user can create the application schema (scgolfcore, etc.) inside the DB.
 		// Mirrors ambientacion.sql: GRANT CONNECT, CREATE ON DATABASE dbtest TO scliquibase.
-		if err := container.GrantConnectCreateOnDatabase(ctx, adminDSN, coords.DBName, lbUsername); err != nil {
+		grantTrace, grantErr := container.GrantConnectCreateOnDatabase(ctx, adminDSN, coords.DBName, lbUsername)
+		schemaTraces = append(schemaTraces, grantTrace)
+		if grantErr != nil {
 			slog.Warn("could not grant CONNECT, CREATE on database to lb user; sync may fail",
-				"user", lbUsername, "db", coords.DBName, "err", err)
+				"user", lbUsername, "db", coords.DBName, "err", grantErr)
 		}
 
 		// Create the lb_<schema> bookkeeping schema owned by the lb user.
@@ -696,31 +710,18 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		// the schema matching the connection username. Without this schema, Liquibase
 		// falls back to public and may fail with permission errors.
 		// Mirrors ambientacion.sql: CREATE SCHEMA scliquibase; ALTER SCHEMA scliquibase OWNER TO scliquibase.
-		if err := container.CreateLbBookkeepingSchema(ctx, adminDSN, lbUsername); err != nil {
+		schemaTrace, schemaErr := container.CreateLbBookkeepingSchema(ctx, adminDSN, lbUsername)
+		schemaTraces = append(schemaTraces, schemaTrace)
+		if schemaErr != nil {
 			slog.Warn("could not create lb bookkeeping schema; sync may fail with schema errors",
-				"schema", lbUsername, "err", err)
+				"schema", lbUsername, "err", schemaErr)
 		}
 	}
 	{
 		schemaSetupDur := time.Since(t0)
-		var schemaLines []string
-		if schemaName != "" {
-			grantRoles, _ := liquibase.ExtractGrantTargetRolesFromArchetype(cloneRoot)
-			schemaLines = append(schemaLines,
-				fmt.Sprintf("schema          %s", schemaName),
-				fmt.Sprintf("lb user         %s  (password: [REDACTED])", lbUsername),
-				fmt.Sprintf("bookkeeping schema: %s", lbUsername),
-			)
-			if len(grantRoles) > 0 {
-				schemaLines = append(schemaLines,
-					fmt.Sprintf("grant-target roles created: %s", strings.Join(grantRoles, ", ")))
-			}
-		} else {
-			schemaLines = append(schemaLines,
-				fmt.Sprintf("no schema found in archetype DDL; using admin user: %s", lbUsername),
-			)
-		}
-		passWithTrace("schema-setup", schemaSetupDur, strings.Join(schemaLines, "\n"))
+		grantRoles, _ := liquibase.ExtractGrantTargetRolesFromArchetype(cloneRoot)
+		passWithTrace("schema-setup", schemaSetupDur,
+			buildSchemaSetupTrace(schemaName, lbUsername, schemaTraces, grantRoles))
 	}
 
 	// Build lb_coords with the lb_<schema> user for liquibase.properties patching.
@@ -976,6 +977,49 @@ func extractHeadLine(output string) string {
 		}
 	}
 	return ""
+}
+
+// buildSchemaSetupTrace renders the schema-setup step trace from the collected
+// provisioning sub-step CommandTrace values. Each trace entry shows the SQL
+// executed and the driver result (command tag or error message).
+func buildSchemaSetupTrace(schemaName, lbUsername string, traces []domain.CommandTrace, grantRoles []string) string {
+	var lines []string
+	if schemaName == "" {
+		lines = append(lines, fmt.Sprintf("no schema found in archetype DDL; using admin user: %s", lbUsername))
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines,
+		fmt.Sprintf("schema          %s", schemaName),
+		fmt.Sprintf("lb user         %s  (password: [REDACTED])", lbUsername),
+		fmt.Sprintf("bookkeeping schema: %s", lbUsername),
+	)
+	if len(grantRoles) > 0 {
+		lines = append(lines, fmt.Sprintf("grant-target roles created: %s", strings.Join(grantRoles, ", ")))
+	}
+	if len(traces) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, "driver results:")
+		for _, tr := range traces {
+			if tr.Command != "" {
+				// Truncate long SQL for readability; first line is sufficient.
+				cmdLine := firstLine(tr.Command)
+				lines = append(lines, fmt.Sprintf("  sql     %s", cmdLine))
+				lines = append(lines, fmt.Sprintf("  result  %s", tr.Output))
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// firstLine returns the first non-empty line of s (trimmed), or s itself if single-line.
+func firstLine(s string) string {
+	for _, l := range strings.Split(s, "\n") {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			return l
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 func tempCloneDir() string {

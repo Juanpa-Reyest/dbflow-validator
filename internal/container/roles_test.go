@@ -1,8 +1,11 @@
 package container_test
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/container"
 )
@@ -136,4 +139,141 @@ func containsInner(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// ---- CommandTrace return tests (Slice 3 — AC-5, AC-6, AC-7) ----
+
+// TestCreateLbUser_TraceRedactsPassword verifies that the returned CommandTrace
+// never contains the real password value (AC-7), contains CREATE ROLE (AC-5),
+// and that its Output records the driver result or error (AC-6).
+// Uses a deliberately invalid DSN so the function returns a connection error —
+// the trace must still be populated with the redacted command.
+func TestCreateLbUser_TraceRedactsPassword(t *testing.T) {
+	ctx := context.Background()
+	const realPassword = "super_secret_pass_123"
+	const lbUsername = "lb_testschema"
+
+	// Use an invalid DSN — the driver will fail to open a connection, but the
+	// function must still return a CommandTrace with the redacted command.
+	trace, err := container.CreateLbUser(ctx, "postgres://invalid-host:5432/db", lbUsername, realPassword)
+
+	// The call MUST return an error (invalid DSN), but trace must be populated.
+	if err == nil {
+		t.Skip("test requires a non-connectable DSN; got nil error (unexpected live DB?)")
+	}
+
+	// AC-7: Real password must NEVER appear in the command trace.
+	if strings.Contains(trace.Command, realPassword) {
+		t.Errorf("real password leaked into CommandTrace.Command: %q", trace.Command)
+	}
+	// AC-5: Command must contain the CREATE ROLE statement (with redacted password).
+	if !strings.Contains(trace.Command, "CREATE ROLE") {
+		t.Errorf("CommandTrace.Command should contain CREATE ROLE; got: %q", trace.Command)
+	}
+	if !strings.Contains(trace.Command, "[REDACTED]") {
+		t.Errorf("CommandTrace.Command should contain [REDACTED] placeholder; got: %q", trace.Command)
+	}
+	// AC-6: Output must contain the driver error.
+	if trace.Output == "" {
+		t.Error("CommandTrace.Output must contain driver error message on failure; got empty")
+	}
+}
+
+// TestCreateRolesIfNotExist_ReturnsTracesPerRole verifies that when the DSN is
+// invalid (host unreachable), each role attempt produces a CommandTrace with the
+// SQL in Command and the driver error in Output (AC-5, AC-6).
+// sql.Open with pgx only fails at ExecContext time, so individual role failures
+// each become a trace entry — this is the expected behavior.
+func TestCreateRolesIfNotExist_ConnectionError(t *testing.T) {
+	ctx := context.Background()
+	roles := []string{"approle", "readonly"}
+
+	traces, err := container.CreateRolesIfNotExist(ctx, "postgres://invalid-host:5432/db", roles)
+
+	// CreateRolesIfNotExist only returns a top-level error on sql.Open failure.
+	// Per-role failures are captured in traces and logged (non-fatal by design).
+	// Since pgx only fails at ExecContext, err must be nil here.
+	if err != nil {
+		t.Fatalf("expected nil error (per-role failures are non-fatal), got: %v", err)
+	}
+
+	// Two roles → two traces.
+	if len(traces) != len(roles) {
+		t.Fatalf("expected %d traces (one per role), got %d", len(roles), len(traces))
+	}
+
+	// AC-5: Each trace Command must contain the role name and DO block.
+	// AC-6: Each trace Output must contain the driver error (non-empty).
+	for i, tr := range traces {
+		if !strings.Contains(tr.Command, roles[i]) {
+			t.Errorf("trace[%d].Command should contain role %q; got: %q", i, roles[i], tr.Command)
+		}
+		if !strings.Contains(tr.Command, "CREATE ROLE") {
+			t.Errorf("trace[%d].Command should contain CREATE ROLE; got: %q", i, tr.Command)
+		}
+		if tr.Output == "" {
+			t.Errorf("trace[%d].Output must be non-empty (driver error); got empty", i)
+		}
+	}
+}
+
+// TestCreateRolesIfNotExist_EmptyRoles verifies that an empty roles list returns
+// nil traces and nil error without attempting any database connection.
+func TestCreateRolesIfNotExist_EmptyRoles(t *testing.T) {
+	ctx := context.Background()
+	traces, err := container.CreateRolesIfNotExist(ctx, "postgres://irrelevant:5432/db", nil)
+	if err != nil {
+		t.Errorf("expected nil error for empty roles, got: %v", err)
+	}
+	if traces != nil {
+		t.Errorf("expected nil traces for empty roles, got: %v", traces)
+	}
+}
+
+// TestGrantConnectCreateOnDatabase_TraceContainsSQL verifies that the returned
+// CommandTrace.Command contains the GRANT statement (AC-5) and that the Output
+// is populated on connection error (AC-6).
+func TestGrantConnectCreateOnDatabase_TraceOnError(t *testing.T) {
+	ctx := context.Background()
+
+	trace, err := container.GrantConnectCreateOnDatabase(ctx, "postgres://invalid-host:5432/db", "testdb", "lb_testuser")
+
+	if err == nil {
+		t.Skip("test requires a non-connectable DSN; got nil error (unexpected live DB?)")
+	}
+	// AC-5: Command must contain the GRANT statement.
+	if !strings.Contains(trace.Command, "GRANT") {
+		t.Errorf("CommandTrace.Command should contain GRANT; got: %q", trace.Command)
+	}
+	if !strings.Contains(trace.Command, "testdb") {
+		t.Errorf("CommandTrace.Command should contain database name; got: %q", trace.Command)
+	}
+	// AC-6: Output must contain driver error.
+	if trace.Output == "" {
+		t.Error("CommandTrace.Output must be non-empty on error")
+	}
+}
+
+// TestCreateLbBookkeepingSchema_TraceJoinsBothStatements verifies that the
+// returned CommandTrace.Command joins both SQL statements (CREATE SCHEMA +
+// ALTER SCHEMA) and that the Output is populated on connection error (AC-5, AC-6).
+func TestCreateLbBookkeepingSchema_TraceOnError(t *testing.T) {
+	ctx := context.Background()
+
+	trace, err := container.CreateLbBookkeepingSchema(ctx, "postgres://invalid-host:5432/db", "lb_testschema")
+
+	if err == nil {
+		t.Skip("test requires a non-connectable DSN; got nil error (unexpected live DB?)")
+	}
+	// AC-5: Command must contain both SQL statements joined.
+	if !strings.Contains(trace.Command, "CREATE SCHEMA") {
+		t.Errorf("CommandTrace.Command should contain CREATE SCHEMA; got: %q", trace.Command)
+	}
+	if !strings.Contains(trace.Command, "ALTER SCHEMA") {
+		t.Errorf("CommandTrace.Command should contain ALTER SCHEMA; got: %q", trace.Command)
+	}
+	// AC-6: Output must contain driver error.
+	if trace.Output == "" {
+		t.Error("CommandTrace.Output must be non-empty on error")
+	}
 }
