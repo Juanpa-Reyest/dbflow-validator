@@ -53,12 +53,13 @@ func (f *fakePreflight) Check(_ context.Context) ([]domain.ToolStatus, error) {
 }
 
 type fakeCloner struct {
-	root string
-	err  error
+	root  string
+	trace domain.CommandTrace
+	err   error
 }
 
-func (f *fakeCloner) Clone(_ context.Context, _ domain.CloneOptions) (string, error) {
-	return f.root, f.err
+func (f *fakeCloner) Clone(_ context.Context, _ domain.CloneOptions) (string, domain.CommandTrace, error) {
+	return f.root, f.trace, f.err
 }
 
 type fakeContainerProvider struct {
@@ -618,12 +619,13 @@ func TestOrchestrator_MavenOut_NilFallsToDiscard(t *testing.T) {
 type mockCloner struct {
 	called bool
 	root   string
+	trace  domain.CommandTrace
 	err    error
 }
 
-func (m *mockCloner) Clone(_ context.Context, _ domain.CloneOptions) (string, error) {
+func (m *mockCloner) Clone(_ context.Context, _ domain.CloneOptions) (string, domain.CommandTrace, error) {
 	m.called = true
-	return m.root, m.err
+	return m.root, m.trace, m.err
 }
 
 // TestRun_InputCheck_MissingSQLInput verifies that when cfg.SQLInputPath does not
@@ -708,5 +710,107 @@ func TestRun_InputCheck_EmptyDir(t *testing.T) {
 	// Must not contain Maven output.
 	if strings.Contains(inputStep.Error, "BUILD FAILURE") {
 		t.Error("error must not contain Maven BUILD FAILURE output")
+	}
+}
+
+// ---- Clone trace tests (Slice 2 — AC-1, AC-2, AC-3, AC-4, AC-19) ----
+
+// TestOrchestrator_CloneTrace_ContainsCommandAndOutput verifies that on a happy-path run
+// the clone step's Trace contains both the redacted command line and the captured output
+// returned by the Cloner (AC-1, AC-2).
+func TestOrchestrator_CloneTrace_ContainsCommandAndOutput(t *testing.T) {
+	deps := happyDeps(t)
+	cloneRoot := deps.Cloner.(*fakeCloner).root
+	deps.Cloner = &fakeCloner{
+		root: cloneRoot,
+		trace: domain.CommandTrace{
+			Command: "git clone --branch main --depth 1 https://example.com/repo.git /tmp/dest",
+			Output:  "Cloning into '/tmp/dest'...\nHEAD is now at abc1234 init",
+		},
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	cloneStep := findStep(t, report, "clone")
+
+	// AC-1: Trace must contain the redacted command line.
+	if !strings.Contains(cloneStep.Trace, "git clone") {
+		t.Errorf("clone Trace must contain command line; trace: %q", cloneStep.Trace)
+	}
+	// AC-2: Trace must contain the captured git output.
+	if !strings.Contains(cloneStep.Trace, "Cloning into") {
+		t.Errorf("clone Trace must contain captured git output; trace: %q", cloneStep.Trace)
+	}
+	// AC-3 (HEAD sha): Trace must contain the HEAD line extracted from output.
+	if !strings.Contains(cloneStep.Trace, "HEAD is now at") {
+		t.Errorf("clone Trace must contain HEAD sha line; trace: %q", cloneStep.Trace)
+	}
+}
+
+// TestOrchestrator_CloneTrace_TokenNotLeaked verifies that the git token never
+// appears in the clone step's Trace even when the fakeCloner returns a trace
+// that would normally contain it (AC-4).
+func TestOrchestrator_CloneTrace_TokenNotLeaked(t *testing.T) {
+	const rawToken = "ghp_super_secret_token_xyz"
+
+	deps := happyDeps(t)
+	cloneRoot := deps.Cloner.(*fakeCloner).root
+	deps.Cloner = &fakeCloner{
+		root: cloneRoot,
+		trace: domain.CommandTrace{
+			// Simulate a badly-formed trace from a buggy adapter that somehow
+			// still included the token — ScrubSecrets at the orchestrator boundary
+			// must catch it before it reaches StepResult.Trace.
+			Command: "git clone --depth 1 https://x-access-token:" + rawToken + "@github.com/org/repo.git /dest",
+			Output:  "Cloning... token=" + rawToken,
+		},
+	}
+
+	cfg := testCfg()
+	cfg.Token = domain.NewSecret(rawToken)
+
+	report := orchestrator.Run(context.Background(), deps, cfg)
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	cloneStep := findStep(t, report, "clone")
+	// AC-4: Raw token must never appear in the trace.
+	if strings.Contains(cloneStep.Trace, rawToken) {
+		t.Errorf("raw token found in clone Trace — ScrubSecrets did not run: %q", cloneStep.Trace)
+	}
+}
+
+// TestOrchestrator_CloneFailure_TraceIncludesCapturedOutput verifies that when
+// Clone fails, the clone step's Trace includes the captured output from the
+// Cloner's CommandTrace (AC-19: clone failure still fires fail — no semantic change).
+func TestOrchestrator_CloneFailure_TraceIncludesCapturedOutput(t *testing.T) {
+	deps := happyDeps(t)
+	deps.Cloner = &fakeCloner{
+		trace: domain.CommandTrace{
+			Command: "git clone --branch main --depth 1 https://example.com/repo.git /dest",
+			Output:  "fatal: repository not found",
+		},
+		err: errors.New("repository clone failed: git clone https://example.com/repo.git: exit status 128: fatal: repository not found"),
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusFailed {
+		t.Fatalf("expected FAILED, got %v", report.Status)
+	}
+
+	cloneStep := findStep(t, report, "clone")
+	if cloneStep.Status != domain.StepStatusFailed {
+		t.Errorf("expected clone step FAILED, got %v", cloneStep.Status)
+	}
+	// The step trace must carry the captured git output on failure.
+	if !strings.Contains(cloneStep.Trace, "fatal: repository not found") {
+		t.Errorf("clone failure Trace must contain captured output; trace: %q", cloneStep.Trace)
 	}
 }

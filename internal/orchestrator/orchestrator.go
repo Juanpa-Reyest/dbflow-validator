@@ -418,14 +418,25 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	reg.Register(func() error {
 		return os.RemoveAll(destDir)
 	})
-	cloneRoot, err := deps.Cloner.Clone(ctx, domain.CloneOptions{
+	cloneRoot, rawCloneTrace, err := deps.Cloner.Clone(ctx, domain.CloneOptions{
 		RepoURL: cfg.RepoURL,
 		Branch:  cfg.BaseBranch,
 		Token:   cfg.Token,
 		DestDir: destDir,
 	})
 	if err != nil {
-		return fail("clone", "git clone failed", err)
+		// Scrub the token from any captured output before including in the trace.
+		scrubbedCmd := domain.ScrubSecrets(rawCloneTrace.Command, cfg.Token.Reveal())
+		scrubbedOutput := domain.ScrubSecrets(rawCloneTrace.Output, cfg.Token.Reveal())
+		var failTrace strings.Builder
+		failTrace.WriteString(fmt.Sprintf("repo    %s\nbranch  %s", redactURL(cfg.RepoURL), cfg.BaseBranch))
+		if scrubbedCmd != "" {
+			failTrace.WriteString(fmt.Sprintf("\ncommand  %s", scrubbedCmd))
+		}
+		if scrubbedOutput != "" {
+			failTrace.WriteString(fmt.Sprintf("\n\n%s", scrubbedOutput))
+		}
+		return failWithTrace("clone", "git clone failed", err, failTrace.String())
 	}
 	log.Debug("clone destination", "clone_root", cloneRoot)
 	// Record the clone root in cs so runCleanupStep can describe the workspace
@@ -458,13 +469,29 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		return MoveWorkspace(capturedCS.cloneRoot, filepath.Join(capturedCS.runDir, "workspace"))
 	})
 	{
-		cloneTrace := fmt.Sprintf(
-			"repo    %s\nbranch  %s\ndest    %s\nstructure: liquibase.properties, master-changelog/ expected",
-			redactURL(cfg.RepoURL),
-			cfg.BaseBranch,
-			cloneRoot,
-		)
-		passWithTrace("clone", time.Since(t0), cloneTrace)
+		// Scrub the token from command and output before writing into the trace.
+		scrubbedCmd := domain.ScrubSecrets(rawCloneTrace.Command, cfg.Token.Reveal())
+		scrubbedOutput := domain.ScrubSecrets(rawCloneTrace.Output, cfg.Token.Reveal())
+
+		// Extract the real HEAD sha from git's output when available.
+		// git shallow clone prints "HEAD is now at <sha>" on success.
+		headLine := extractHeadLine(scrubbedOutput)
+
+		// Always include repo, branch, and dest so the trace is human-readable
+		// even when the adapter returns an empty CommandTrace (e.g. test fakes).
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("repo    %s\nbranch  %s\ndest    %s",
+			redactURL(cfg.RepoURL), cfg.BaseBranch, cloneRoot))
+		if scrubbedCmd != "" {
+			sb.WriteString(fmt.Sprintf("\ncommand  %s", scrubbedCmd))
+		}
+		if scrubbedOutput != "" {
+			sb.WriteString(fmt.Sprintf("\n\n%s", scrubbedOutput))
+		}
+		if headLine != "" {
+			sb.WriteString(fmt.Sprintf("\nhead    %s", headLine))
+		}
+		passWithTrace("clone", time.Since(t0), sb.String())
 	}
 
 	// Write settings.xml into the clone dir so the Maven container can pick it up
@@ -929,6 +956,26 @@ func buildRedactedMvnCmd(goal string, params []string) string {
 	}
 	parts = append(parts, "-Dparams="+strings.Join(params, " "))
 	return strings.Join(parts, " ")
+}
+
+// extractHeadLine scans git's combined output for the line that identifies the
+// checked-out HEAD commit. git shallow clone prints:
+//
+//	"HEAD is now at <sha> <message>"
+//
+// or, in some versions:
+//
+//	"Note: switching to '<sha>'."
+//
+// Returns the matching line (trimmed) or empty string if none found.
+func extractHeadLine(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "HEAD is now at ") {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func tempCloneDir() string {

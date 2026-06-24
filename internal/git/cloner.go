@@ -53,10 +53,16 @@ func NewCloner(execFn ExecFunc, mkdirFn MkdirAllFunc) *GitCloner {
 // After cloning, Clone validates that the required archetype paths exist:
 //   - src/main/resources/db/liquibase.properties
 //   - src/main/resources/db/schema/master-changelog/ (directory)
-func (c *GitCloner) Clone(ctx context.Context, opts domain.CloneOptions) (string, error) {
+//
+// The returned CommandTrace holds the exact (redacted) command line and the
+// combined stdout+stderr produced by git. The trace is returned even on failure
+// so callers can surface git's diagnostic output in the step trace.
+// The adapter never scrubs secrets from the trace — the orchestrator does that
+// via domain.ScrubSecrets before writing the trace to StepResult.Trace.
+func (c *GitCloner) Clone(ctx context.Context, opts domain.CloneOptions) (string, domain.CommandTrace, error) {
 	// Create destination directory with restrictive permissions.
 	if err := c.mkdirFn(opts.DestDir, 0o700); err != nil {
-		return "", fmt.Errorf("create clone dir: %w", err)
+		return "", domain.CommandTrace{}, fmt.Errorf("create clone dir: %w", err)
 	}
 
 	// Build the authenticated URL. The token is revealed exactly once here,
@@ -67,33 +73,42 @@ func (c *GitCloner) Clone(ctx context.Context, opts domain.CloneOptions) (string
 		realURL = injectToken(opts.RepoURL, rawToken)
 	}
 
+	// Build the redacted command string for the trace (never contains the real token).
+	redactedCmdArgs := []string{"git", "clone", "--branch", opts.Branch, "--depth", "1", redactURL(opts.RepoURL), opts.DestDir}
+	redactedCmd := strings.Join(redactedCmdArgs, " ")
+
 	// Run: git clone --branch <branch> --depth 1 <url> <dest>
+	// Route both stdout and stderr into the same capture buffer so we surface
+	// the full git output (progress on stderr, object counts on stdout) in the
+	// execution.log trace. The buffer is NOT forwarded to os.Stderr so that
+	// git's progress lines do not pollute the console.
 	args := []string{"clone", "--branch", opts.Branch, "--depth", "1", realURL, opts.DestDir}
 	cmd := c.execFn(ctx, "git", args...)
-	cmd.Stdout = nil
-	// Capture git's stderr into a buffer so we can include it in the error message.
-	// This makes failures like "remote branch X not found" visible instead of the
-	// bare "exit status 128". The buffer is safe to include: git does not echo the
-	// injected token into stderr; only the redacted original URL is surfaced.
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	var combinedBuf bytes.Buffer
+	cmd.Stdout = &combinedBuf
+	cmd.Stderr = &combinedBuf // both streams share the same buffer
 
 	if err := cmd.Run(); err != nil {
 		// Never include the real URL in the error message (it may contain the token).
-		redactedURL := redactURL(opts.RepoURL)
-		stderrText := strings.TrimSpace(stderrBuf.String())
-		if stderrText != "" {
-			return "", fmt.Errorf("%w: git clone %s: %v: %s", domain.ErrCloneFailed, redactedURL, err, stderrText)
+		combinedText := strings.TrimSpace(combinedBuf.String())
+		trace := domain.CommandTrace{Command: redactedCmd, Output: combinedText}
+		if combinedText != "" {
+			return "", trace, fmt.Errorf("%w: git clone %s: %v: %s", domain.ErrCloneFailed, redactURL(opts.RepoURL), err, combinedText)
 		}
-		return "", fmt.Errorf("%w: git clone %s: %v", domain.ErrCloneFailed, redactedURL, err)
+		return "", trace, fmt.Errorf("%w: git clone %s: %v", domain.ErrCloneFailed, redactURL(opts.RepoURL), err)
 	}
 
 	// Validate required archetype structure.
 	if err := validateStructure(opts.DestDir); err != nil {
-		return "", err
+		trace := domain.CommandTrace{Command: redactedCmd, Output: strings.TrimSpace(combinedBuf.String())}
+		return "", trace, err
 	}
 
-	return opts.DestDir, nil
+	trace := domain.CommandTrace{
+		Command: redactedCmd,
+		Output:  strings.TrimSpace(combinedBuf.String()),
+	}
+	return opts.DestDir, trace, nil
 }
 
 // injectToken rewrites an HTTPS URL to embed x-access-token:<token>@ for git auth.

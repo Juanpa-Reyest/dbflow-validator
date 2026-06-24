@@ -26,8 +26,12 @@ type CloneOptions struct {
 }
 
 // Cloner clones a remote git repository into a local directory.
+// On success, returns the clone root path, a CommandTrace containing the exact
+// (redacted) command line and combined stdout+stderr output, and nil error.
+// On failure, returns empty cloneRoot, a CommandTrace with partial output
+// captured before the failure, and the error.
 type Cloner interface {
-	Clone(ctx context.Context, opts CloneOptions) (cloneRoot string, err error)
+	Clone(ctx context.Context, opts CloneOptions) (cloneRoot string, trace CommandTrace, err error)
 }
 
 // ContainerCoords holds ephemeral container connection details.
