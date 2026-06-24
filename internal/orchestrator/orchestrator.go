@@ -531,17 +531,24 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		log.Debug("overlay file list", "files", strings.Join(overlayFiles, ", "), "count", len(overlayFiles))
 		t0 = time.Now()
 		destSQLInput := cloneRoot + "/src/main/resources/SQLInput"
-		copiedCount, err := deps.Overlayer.Apply(cfg.SQLInputPath, destSQLInput)
+		copiedPaths, err := deps.Overlayer.Apply(cfg.SQLInputPath, destSQLInput)
 		if err != nil {
 			return fail("overlay", "SQLInput overlay failed", err)
 		}
 		{
 			var overlayLines []string
 			overlayLines = append(overlayLines,
-				fmt.Sprintf("files copied: %d  (src: %s → dest: %s)",
-					copiedCount, cfg.SQLInputPath, destSQLInput))
-			for _, f := range overlayFiles {
-				overlayLines = append(overlayLines, "  "+f)
+				fmt.Sprintf("copied: %d files  (src: %s → dest: %s)",
+					len(copiedPaths), cfg.SQLInputPath, destSQLInput))
+			for _, p := range copiedPaths {
+				overlayLines = append(overlayLines, "  "+p)
+			}
+			// Also list the src file names for human-readable context.
+			if len(overlayFiles) > 0 {
+				overlayLines = append(overlayLines, "src files:")
+				for _, f := range overlayFiles {
+					overlayLines = append(overlayLines, "  "+f)
+				}
 			}
 			passWithTrace("overlay", time.Since(t0), strings.Join(overlayLines, "\n"))
 		}
@@ -759,12 +766,20 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	notify(deps, "pom-driver-inject", false, false)
 	t0 = time.Now()
 	clonedPomPath := cloneRoot + "/pom.xml"
-	if err := maven.InjectDriverDependency(clonedPomPath); err != nil {
-		return fail("pom-driver-inject", "failed to inject PostgreSQL driver into cloned pom.xml", err)
+	injectedBlock, pomNoOp, pomErr := maven.InjectDriverDependency(clonedPomPath)
+	if pomErr != nil {
+		return fail("pom-driver-inject", "failed to inject PostgreSQL driver into cloned pom.xml", pomErr)
 	}
-	passWithTrace("pom-driver-inject", time.Since(t0),
-		fmt.Sprintf("injected driver: %s:%s:%s into %s",
-			"org.postgresql", "postgresql", maven.PostgresDriverVersion, clonedPomPath))
+	{
+		var pomTrace string
+		if pomNoOp {
+			pomTrace = fmt.Sprintf("driver already present or plugin not found — pom unchanged\npom     %s", clonedPomPath)
+		} else {
+			pomTrace = fmt.Sprintf("injected driver: %s:%s:%s\npom     %s\n\n%s",
+				"org.postgresql", "postgresql", maven.PostgresDriverVersion, clonedPomPath, injectedBlock)
+		}
+		passWithTrace("pom-driver-inject", time.Since(t0), pomTrace)
+	}
 
 	// --- Step 6c: Patch liquibase.properties ---
 	log.Info("step.start", "step", "properties-patch",
@@ -776,20 +791,39 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	)
 	notify(deps, "properties-patch", false, false)
 	t0 = time.Now()
-	if err := deps.Patcher.Patch(propsPath, lbCoords); err != nil {
-		return fail("properties-patch", "failed to patch liquibase.properties", err)
+	propChanges, patchErr := deps.Patcher.Patch(propsPath, lbCoords)
+	if patchErr != nil {
+		return fail("properties-patch", "failed to patch liquibase.properties", patchErr)
 	}
 	{
-		jdbcHost := lbCoords.Host
-		jdbcPort := lbCoords.Port
-		if lbCoords.AliasHost != "" {
-			jdbcHost = lbCoords.AliasHost
-			jdbcPort = lbCoords.AliasPort
+		var patchLines []string
+		patchLines = append(patchLines, fmt.Sprintf("file     %s", propsPath))
+		for _, ch := range propChanges {
+			before := ch.Before
+			after := ch.After
+			// Scrub password values — never reveal them in the trace.
+			// For the "password" key: always replace with [REDACTED].
+			// For other keys: apply ScrubSecrets only if lbPassword or coords.Password
+			// appear literally (defense-in-depth), but only when those secrets are
+			// long enough to avoid false positives (len >= 8).
+			if ch.Key == "password" {
+				before = "[REDACTED]"
+				after = "[REDACTED]"
+			} else {
+				// Only scrub if secrets are meaningful (len >= 8) to avoid
+				// false-positive matches on short strings like "p" in "postgresql".
+				var safeSecrets []string
+				for _, s := range []string{lbPassword, coords.Password} {
+					if len(s) >= 8 {
+						safeSecrets = append(safeSecrets, s)
+					}
+				}
+				before = domain.ScrubSecrets(before, safeSecrets...)
+				after = domain.ScrubSecrets(after, safeSecrets...)
+			}
+			patchLines = append(patchLines, fmt.Sprintf("  %-10s  before: %s  after: %s", ch.Key, before, after))
 		}
-		jdbcURL := fmt.Sprintf("jdbc:postgresql://%s:%d/%s", jdbcHost, jdbcPort, lbCoords.DBName)
-		passWithTrace("properties-patch", time.Since(t0),
-			fmt.Sprintf("url      %s\nusername %s\npassword [REDACTED]",
-				jdbcURL, lbCoords.User))
+		passWithTrace("properties-patch", time.Since(t0), strings.Join(patchLines, "\n"))
 	}
 
 	// --- Step 6d: Pre-sync validation (optional seam) ---

@@ -90,7 +90,7 @@ func makeTraceDeps(t *testing.T) (orchestrator.Deps, config.Config, *bytes.Buffe
 			rollbackResult: domain.StepResult{Status: domain.StepStatusPassed},
 		},
 		ReadinessPolicy: &fastPolicy,
-		Overlayer:       &fakeOverlayer{copied: 1},
+		Overlayer:       &fakeOverlayer{paths: []string{"/fake/dest/a.sql"}},
 		// NetworkFactory creates a fake network with a known name so trace assertions
 		// can verify the network name appears in log output.
 		NetworkFactory: func(_ context.Context) (string, func() error, error) {

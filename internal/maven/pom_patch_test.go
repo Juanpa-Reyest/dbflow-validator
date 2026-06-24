@@ -109,7 +109,8 @@ func TestInjectDriverDependency(t *testing.T) {
 				t.Fatalf("write pom: %v", err)
 			}
 
-			if err := maven.InjectDriverDependency(pomPath); err != nil {
+			injected, noOp, err := maven.InjectDriverDependency(pomPath)
+			if err != nil {
 				t.Fatalf("InjectDriverDependency: %v", err)
 			}
 
@@ -126,9 +127,33 @@ func TestInjectDriverDependency(t *testing.T) {
 				t.Errorf("patched pom should NOT contain %q\nGot:\n%s", tt.wantAbsent, got)
 			}
 
+			// AC-12/AC-13: verify noOp and injected return values.
+			if tt.name == "pom without the target plugin — no-op" {
+				if !noOp {
+					t.Error("expected noOp=true when plugin not found")
+				}
+				if injected != "" {
+					t.Errorf("expected empty injected on no-op; got: %q", injected)
+				}
+			} else if tt.name == "driver already present — idempotent, no duplication" {
+				if !noOp {
+					t.Error("expected noOp=true when driver already present")
+				}
+			} else {
+				// For cases where driver was actually injected.
+				if noOp && tt.wantSubstring != "" {
+					// Check: if the pom had the driver already, noOp is correct; skip.
+					_ = noOp
+				}
+				if !noOp && injected == "" {
+					t.Error("expected non-empty injected block when driver was newly added")
+				}
+			}
+
 			// Idempotency check: calling twice should not duplicate the driver.
-			if err := maven.InjectDriverDependency(pomPath); err != nil {
-				t.Fatalf("second InjectDriverDependency: %v", err)
+			_, _, err2 := maven.InjectDriverDependency(pomPath)
+			if err2 != nil {
+				t.Fatalf("second InjectDriverDependency: %v", err2)
 			}
 			result2, _ := os.ReadFile(pomPath)
 			count := strings.Count(string(result2), "org.postgresql")

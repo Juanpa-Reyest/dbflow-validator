@@ -91,7 +91,14 @@ func makeStepTraceDeps(t *testing.T, schemaSQL string) (orchestrator.Deps, confi
 				},
 			},
 		},
-		Patcher:         &fakePatcher{},
+		Patcher: &fakePatcher{
+			changes: []domain.PropChange{
+				{Key: "url", Before: "jdbc:oracle:old", After: "jdbc:postgresql://postgres:5432/validatordb"},
+				{Key: "username", Before: "old_user", After: "validator"},
+				{Key: "password", Before: "old_pass", After: "v4lid4t0r_pass"},
+				{Key: "driver", Before: "oracle.jdbc.OracleDriver", After: "org.postgresql.Driver"},
+			},
+		},
 		Engine:          &fakeEngineDetector{engine: "postgresql"},
 		Tags:            &fakeTagResolver{tag: "v1.0.0"},
 		Maven: &fakeMavenRunner{
@@ -99,7 +106,7 @@ func makeStepTraceDeps(t *testing.T, schemaSQL string) (orchestrator.Deps, confi
 			rollbackResult: domain.StepResult{Status: domain.StepStatusPassed},
 		},
 		ReadinessPolicy: &fastPolicy,
-		Overlayer:       &fakeOverlayer{copied: 2},
+		Overlayer:       &fakeOverlayer{paths: []string{"/fake/dest/N0001.sql", "/fake/dest/N0002.sql"}},
 	}
 
 	cfg := config.Config{

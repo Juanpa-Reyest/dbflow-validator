@@ -20,15 +20,18 @@ func NewPatcher() *Patcher { return &Patcher{} }
 // Patch reads the properties file at path, injects the ephemeral coordinates,
 // and writes the result back to the same path. Extra keys are preserved (lossless).
 // The file at path must exist; an error is returned otherwise.
-func (pt *Patcher) Patch(path string, coords domain.ContainerCoords) error {
+// Returns the list of key-value changes made (before→after per key).
+// IMPORTANT: the caller must apply ScrubSecrets on the password values before
+// writing them into StepResult.Trace — this function returns the raw values.
+func (pt *Patcher) Patch(path string, coords domain.ContainerCoords) ([]domain.PropChange, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
 	props, err := Parse(data)
 	if err != nil {
-		return fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
 	// Use the Docker network alias when available (Maven container path),
@@ -40,16 +43,28 @@ func (pt *Patcher) Patch(path string, coords domain.ContainerCoords) error {
 		jdbcPort = coords.AliasPort
 	}
 	jdbcURL := fmt.Sprintf("jdbc:postgresql://%s:%d/%s", jdbcHost, jdbcPort, coords.DBName)
-	props.Set("url", jdbcURL)
-	props.Set("username", coords.User)
-	props.Set("password", coords.Password)
-	props.Set("driver", "org.postgresql.Driver")
+
+	// Track before→after for each key we set.
+	type kv struct{ key, val string }
+	newValues := []kv{
+		{"url", jdbcURL},
+		{"username", coords.User},
+		{"password", coords.Password},
+		{"driver", "org.postgresql.Driver"},
+	}
+
+	changes := make([]domain.PropChange, 0, len(newValues))
+	for _, nv := range newValues {
+		before := props.Get(nv.key)
+		props.Set(nv.key, nv.val)
+		changes = append(changes, domain.PropChange{Key: nv.key, Before: before, After: nv.val})
+	}
 
 	rendered := Render(props)
 	if err := os.WriteFile(path, rendered, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+		return nil, fmt.Errorf("write %s: %w", path, err)
 	}
-	return nil
+	return changes, nil
 }
 
 // Ensure Patcher satisfies domain.PropertiesPatcher at compile time.

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
@@ -25,12 +26,12 @@ func TestOverlay_NestedSubdirsPreserved(t *testing.T) {
 	}
 
 	o := overlay.New()
-	copied, err := o.Apply(src, dst)
+	paths, err := o.Apply(src, dst)
 	if err != nil {
 		t.Fatalf("Apply error: %v", err)
 	}
-	if copied != 1 {
-		t.Errorf("expected 1 file copied, got %d", copied)
+	if len(paths) != 1 {
+		t.Errorf("expected 1 file copied, got %d", len(paths))
 	}
 
 	destFile := filepath.Join(dst, "a", "b", "c", "migration.sql")
@@ -40,6 +41,11 @@ func TestOverlay_NestedSubdirsPreserved(t *testing.T) {
 	}
 	if string(got) != string(content) {
 		t.Errorf("content mismatch: got %q, want %q", got, content)
+	}
+
+	// AC-11: returned path must match the dest file path.
+	if paths[0] != destFile {
+		t.Errorf("returned path = %q, want %q", paths[0], destFile)
 	}
 }
 
@@ -62,6 +68,7 @@ func TestOverlay_StaleDestFileClearedFirst(t *testing.T) {
 	if _, err := o.Apply(src, dst); err != nil {
 		t.Fatalf("Apply error: %v", err)
 	}
+	// Note: old.sql was in dest but not in src — it should be gone after clear-then-copy.
 
 	// Stale file must be gone.
 	if _, err := os.Stat(staleFile); !os.IsNotExist(err) {
@@ -79,12 +86,15 @@ func TestOverlay_EmptySource_ReturnsErrNoPendingSQL(t *testing.T) {
 
 	// Source directory exists but has zero .sql files.
 	o := overlay.New()
-	_, err := o.Apply(src, dst)
+	paths, err := o.Apply(src, dst)
 	if err == nil {
 		t.Fatal("expected error for empty source, got nil")
 	}
 	if !errors.Is(err, domain.ErrNoPendingSQL) {
 		t.Errorf("expected ErrNoPendingSQL, got: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Errorf("expected nil paths on error, got %v", paths)
 	}
 }
 
@@ -104,12 +114,12 @@ func TestOverlay_NonSQLFilesNotCopied(t *testing.T) {
 	}
 
 	o := overlay.New()
-	copied, err := o.Apply(src, dst)
+	paths, err := o.Apply(src, dst)
 	if err != nil {
 		t.Fatalf("Apply error: %v", err)
 	}
-	if copied != 1 {
-		t.Errorf("expected 1 file copied (only .sql), got %d", copied)
+	if len(paths) != 1 {
+		t.Errorf("expected 1 file copied (only .sql), got %d", len(paths))
 	}
 
 	// Non-SQL files must not appear in dest.
@@ -141,8 +151,12 @@ func TestOverlay_SourceNotMutated(t *testing.T) {
 	}
 
 	o := overlay.New()
-	if _, err := o.Apply(src, dst); err != nil {
+	copiedPaths, err := o.Apply(src, dst)
+	if err != nil {
 		t.Fatalf("Apply error: %v", err)
+	}
+	if len(copiedPaths) == 0 {
+		t.Error("expected at least one copied path; got none")
 	}
 
 	// Source file must be identical after Apply.
@@ -160,6 +174,51 @@ func TestOverlay_SourceNotMutated(t *testing.T) {
 	}
 	if string(beforeContent) != string(afterContent) {
 		t.Errorf("source file content changed after Apply")
+	}
+}
+
+// TestOverlay_ReturnedPathsMatchDestFiles verifies that Apply returns the full list
+// of dest file paths for all copied files including those in subdirectories (AC-11).
+func TestOverlay_ReturnedPathsMatchDestFiles(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	// Create a flat file and a nested file.
+	if err := os.WriteFile(filepath.Join(src, "flat.sql"), []byte("-- flat"), 0o600); err != nil {
+		t.Fatalf("write flat: %v", err)
+	}
+	subDir := filepath.Join(src, "sub")
+	if err := os.MkdirAll(subDir, 0o700); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "nested.sql"), []byte("-- nested"), 0o600); err != nil {
+		t.Fatalf("write nested: %v", err)
+	}
+
+	o := overlay.New()
+	paths, err := o.Apply(src, dst)
+	if err != nil {
+		t.Fatalf("Apply error: %v", err)
+	}
+
+	// AC-11: must return one path per copied file.
+	if len(paths) != 2 {
+		t.Fatalf("expected 2 paths, got %d: %v", len(paths), paths)
+	}
+
+	// Each returned path must exist on disk.
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("returned path %q does not exist on disk: %v", p, err)
+		}
+	}
+
+	// Each returned path must be inside dst.
+	for _, p := range paths {
+		rel, err := filepath.Rel(dst, p)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			t.Errorf("returned path %q is not inside dst %q", p, dst)
+		}
 	}
 }
 

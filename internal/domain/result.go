@@ -37,6 +37,15 @@ type CommandTrace struct {
 	Output string
 }
 
+// PropChange records a before→after change to a single key in liquibase.properties.
+// Sensitive values (password) must be replaced with "[REDACTED]" before the
+// orchestrator stores this in StepResult.Trace.
+type PropChange struct {
+	Key    string
+	Before string
+	After  string
+}
+
 // StepResult holds the outcome, timing, and trace for one validation step.
 type StepResult struct {
 	Name       string        `json:"name"`

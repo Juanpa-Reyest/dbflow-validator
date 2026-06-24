@@ -89,9 +89,14 @@ func (f *fakeDatabaseProvider) ContainerProvider() domain.ContainerProvider     
 func (f *fakeDatabaseProvider) DSN(coords domain.ContainerCoords) string           { return "postgres://fake" }
 func (f *fakeDatabaseProvider) Ping(_ context.Context, _ string) error             { return f.pingErr }
 
-type fakePatcher struct{ err error }
+type fakePatcher struct {
+	changes []domain.PropChange
+	err     error
+}
 
-func (f *fakePatcher) Patch(_ string, _ domain.ContainerCoords) error { return f.err }
+func (f *fakePatcher) Patch(_ string, _ domain.ContainerCoords) ([]domain.PropChange, error) {
+	return f.changes, f.err
+}
 
 type fakeEngineDetector struct {
 	engine string
@@ -407,13 +412,13 @@ func TestOrchestrator_PreSyncValidator_OutputInTrace_Fail(t *testing.T) {
 // fakeOverlayer records calls and returns a controllable result.
 type fakeOverlayer struct {
 	called bool
-	copied int
+	paths  []string
 	err    error
 }
 
-func (f *fakeOverlayer) Apply(_, _ string) (int, error) {
+func (f *fakeOverlayer) Apply(_, _ string) ([]string, error) {
 	f.called = true
-	return f.copied, f.err
+	return f.paths, f.err
 }
 
 // makeHappyDepsWithSQLInput creates happyDeps pre-populated with a temp SQLInput dir
@@ -435,7 +440,7 @@ func makeHappyDepsWithSQLInput(t *testing.T) (orchestrator.Deps, config.Config, 
 // step appears in Steps between "engine-guard" and "container-start".
 func TestRun_OverlayStep_Wired(t *testing.T) {
 	deps, cfg, _ := makeHappyDepsWithSQLInput(t)
-	ol := &fakeOverlayer{copied: 1}
+	ol := &fakeOverlayer{paths: []string{"/fake/dest/a.sql"}}
 	deps.Overlayer = ol
 
 	report := orchestrator.Run(context.Background(), deps, cfg)
@@ -925,5 +930,69 @@ func TestOrchestrator_ContainerStart_TraceContainsContainerID(t *testing.T) {
 	// AC-8: container-start Trace must include the container ID when provided.
 	if !strings.Contains(containerStep.Trace, fakeContainerID) {
 		t.Errorf("container-start Trace must contain ContainerID %q; trace: %q", fakeContainerID, containerStep.Trace)
+	}
+}
+
+// ---- Properties-patch trace tests (Slice 6c — AC-14, AC-15) ----
+
+// TestOrchestrator_PropertiesPatch_TraceContainsChanges verifies that when
+// the patcher returns PropChange entries, the properties-patch Trace reflects
+// the before→after changes (AC-14).
+func TestOrchestrator_PropertiesPatch_TraceContainsChanges(t *testing.T) {
+	deps := happyDeps(t)
+	const fakeURL = "jdbc:postgresql://127.0.0.1:5432/testdb"
+	deps.Patcher = &fakePatcher{
+		changes: []domain.PropChange{
+			{Key: "url", Before: "jdbc:oracle:old", After: fakeURL},
+			{Key: "username", Before: "old_user", After: "lb_test"},
+			{Key: "password", Before: "old_pass", After: "secret123"},
+			{Key: "driver", Before: "oracle.jdbc.OracleDriver", After: "org.postgresql.Driver"},
+		},
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	patchStep := findStep(t, report, "properties-patch")
+	// AC-14: Trace must contain key names and after-values (url at minimum).
+	if !strings.Contains(patchStep.Trace, "url") {
+		t.Errorf("properties-patch Trace must contain key 'url'; trace: %q", patchStep.Trace)
+	}
+	if !strings.Contains(patchStep.Trace, "jdbc:postgresql") {
+		t.Errorf("properties-patch Trace must contain new JDBC URL; trace: %q", patchStep.Trace)
+	}
+}
+
+// TestOrchestrator_PropertiesPatch_PasswordNotInTrace verifies that the raw
+// password value never appears in the properties-patch Trace (AC-15).
+func TestOrchestrator_PropertiesPatch_PasswordNotInTrace(t *testing.T) {
+	const rawPassword = "super_secret_pass_xyz"
+	deps := happyDeps(t)
+	deps.Patcher = &fakePatcher{
+		changes: []domain.PropChange{
+			{Key: "url", Before: "old", After: "jdbc:postgresql://127.0.0.1:5432/db"},
+			{Key: "username", Before: "old", After: "lb_test"},
+			{Key: "password", Before: "old_pass", After: rawPassword},
+			{Key: "driver", Before: "old", After: "org.postgresql.Driver"},
+		},
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	patchStep := findStep(t, report, "properties-patch")
+	// AC-15: Raw password must NEVER appear in the trace.
+	if strings.Contains(patchStep.Trace, rawPassword) {
+		t.Errorf("raw password %q leaked into properties-patch Trace; trace: %q", rawPassword, patchStep.Trace)
+	}
+	// Trace must show [REDACTED] instead.
+	if !strings.Contains(patchStep.Trace, "[REDACTED]") {
+		t.Errorf("properties-patch Trace must contain [REDACTED] for password; trace: %q", patchStep.Trace)
 	}
 }

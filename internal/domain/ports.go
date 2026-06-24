@@ -83,8 +83,10 @@ type DatabaseProvider interface {
 }
 
 // PropertiesPatcher overwrites liquibase.properties with ephemeral container coords.
+// Returns the list of key-value changes made (before→after per key); password
+// values in Before and After must be redacted by the caller before storing in Trace.
 type PropertiesPatcher interface {
-	Patch(path string, coords ContainerCoords) error
+	Patch(path string, coords ContainerCoords) (changes []PropChange, err error)
 }
 
 // EngineDetector reads liquibase.properties and identifies the target DB engine.
@@ -138,7 +140,8 @@ func (NoOpPreSyncValidator) ValidatePreSync(_ context.Context, _ string) (string
 // Only regular .sql files are copied; symlinks and device files are skipped.
 //
 // Returns ErrNoPendingSQL (wrapped) if srcDir contains no .sql files.
-// Returns (copied int, err error) where copied is the number of files written.
+// Returns (paths []string, err error) where paths is the list of dest file
+// paths written (len(paths) replaces the former "copied int" count).
 type Overlayer interface {
-	Apply(srcDir, destSQLInputDir string) (copied int, err error)
+	Apply(srcDir, destSQLInputDir string) (paths []string, err error)
 }

@@ -43,24 +43,36 @@ var driverDependencyXML = `          <dependency>
 // driver must be declared inside the <plugin><dependencies> block to be visible
 // to the plugin at runtime.
 //
+// Returns:
+//   - (injected string, false, nil) when the driver was injected; injected is the
+//     XML snippet added to the pom.
+//   - ("", true, nil) when the driver was already present (idempotent no-op) or
+//     when the target plugin was not found (pom unchanged).
+//   - ("", false, err) on I/O or parse error.
+//
 // This function:
 //   - Is idempotent (no-op if the driver is already present).
 //   - Is a no-op when the target plugin is not found in the pom.
 //   - Does NOT parse the pom with an XML decoder to avoid reformatting the file;
 //     it uses targeted string replacement to preserve the original formatting.
-func InjectDriverDependency(pomPath string) error {
-	data, err := os.ReadFile(pomPath)
-	if err != nil {
-		return fmt.Errorf("InjectDriverDependency: read %q: %w", pomPath, err)
+func InjectDriverDependency(pomPath string) (injected string, noOp bool, err error) {
+	data, readErr := os.ReadFile(pomPath)
+	if readErr != nil {
+		return "", false, fmt.Errorf("InjectDriverDependency: read %q: %w", pomPath, readErr)
 	}
-	patched, err := injectDriver(string(data))
-	if err != nil {
-		return fmt.Errorf("InjectDriverDependency: patch %q: %w", pomPath, err)
+	original := string(data)
+	patched, patchErr := injectDriver(original)
+	if patchErr != nil {
+		return "", false, fmt.Errorf("InjectDriverDependency: patch %q: %w", pomPath, patchErr)
 	}
-	if err := os.WriteFile(pomPath, []byte(patched), 0o644); err != nil {
-		return fmt.Errorf("InjectDriverDependency: write %q: %w", pomPath, err)
+	// If nothing changed, it was a no-op (already present or plugin not found).
+	if patched == original {
+		return "", true, nil
 	}
-	return nil
+	if writeErr := os.WriteFile(pomPath, []byte(patched), 0o644); writeErr != nil {
+		return "", false, fmt.Errorf("InjectDriverDependency: write %q: %w", pomPath, writeErr)
+	}
+	return driverDependencyXML, false, nil
 }
 
 // injectDriver performs the string-level injection on the pom XML content.
