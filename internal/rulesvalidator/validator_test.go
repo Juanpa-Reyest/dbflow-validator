@@ -70,16 +70,16 @@ func (r *logCapturingRunner) RunValidator(
 		return r.logOutput, r.err
 	}
 	// Write the report file, mirroring what the real JAR does.
+	// Derive cloneRoot from the typed mount targeting /work.
 	var cloneRoot string
-	for _, b := range req.Binds {
-		parts := strings.SplitN(b, ":", 3)
-		if len(parts) >= 2 && parts[1] == "/work" {
-			cloneRoot = parts[0]
+	for _, m := range req.Mounts {
+		if m.Target == "/work" {
+			cloneRoot = m.Source
 			break
 		}
 	}
 	if cloneRoot == "" {
-		return r.logOutput, errors.New("logCapturingRunner: no /work bind found")
+		return r.logOutput, errors.New("logCapturingRunner: no /work mount found")
 	}
 	reportPath := rulesvalidator.ReportPath(cloneRoot)
 	if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {

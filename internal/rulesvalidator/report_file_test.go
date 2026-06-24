@@ -136,16 +136,16 @@ func TestBuildContainerRequest_OutputPointsToOutputReportInWork(t *testing.T) {
 
 func TestBuildContainerRequest_CloneRootMountedReadWrite(t *testing.T) {
 	req := buildTestRequest(t)
-	// The cloneRoot bind must NOT end in :ro — must be rw so the container can write the report.
-	for _, b := range req.Binds {
-		if strings.HasPrefix(b, testCloneRoot+":") && strings.Contains(b, "/work") {
-			if strings.HasSuffix(b, ":ro") {
-				t.Errorf("cloneRoot bind must not be :ro (container must write report); bind=%q", b)
+	// The cloneRoot mount must be read-write so the container can write the report.
+	for _, m := range req.Mounts {
+		if m.Source == testCloneRoot && m.Target == "/work" {
+			if m.ReadOnly {
+				t.Errorf("cloneRoot mount must not be ReadOnly (container must write report); mount=%+v", m)
 			}
 			return
 		}
 	}
-	t.Errorf("cloneRoot:/work bind not found; binds=%v", req.Binds)
+	t.Errorf("cloneRoot:/work mount not found; mounts=%+v", req.Mounts)
 }
 
 // ---------------------------------------------------------------------------
@@ -168,18 +168,16 @@ func (f *fileWritingRunner) RunValidator(
 	if f.err != nil {
 		return "", f.err
 	}
-	// Derive the host-side cloneRoot from the binds: the bind that maps to /work.
-	// We write the report at the outputReport path within that cloneRoot.
+	// Derive the host-side cloneRoot from the typed mounts: the mount targeting /work.
 	var cloneRoot string
-	for _, b := range req.Binds {
-		parts := strings.SplitN(b, ":", 3)
-		if len(parts) >= 2 && parts[1] == "/work" {
-			cloneRoot = parts[0]
+	for _, m := range req.Mounts {
+		if m.Target == "/work" {
+			cloneRoot = m.Source
 			break
 		}
 	}
 	if cloneRoot == "" {
-		return "", errors.New("fileWritingRunner: no /work bind found in request")
+		return "", errors.New("fileWritingRunner: no /work mount found in request")
 	}
 	reportPath := rulesvalidator.ReportPath(cloneRoot)
 	if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
