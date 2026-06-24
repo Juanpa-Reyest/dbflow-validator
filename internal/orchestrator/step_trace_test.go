@@ -407,13 +407,14 @@ func TestStepTrace_PreSyncValidate_ContainsNoOpNote(t *testing.T) {
 	}
 }
 
-// TestStepTrace_PreSyncValidate_ActiveValidator_PassNoteContainsStatusPASS asserts
+// TestStepTrace_PreSyncValidate_ActiveValidator_PassNoteContainsPassed asserts
 // that when an active (non-no-op) PreSyncValidator is wired and returns nil, the
-// trace note contains "status PASS" and the cloneRoot path.
-func TestStepTrace_PreSyncValidate_ActiveValidator_PassNoteContainsStatusPASS(t *testing.T) {
+// trace note contains "passed" (generic) and the cloneRoot path, but does NOT
+// mention "no-op" or "not enabled".
+func TestStepTrace_PreSyncValidate_ActiveValidator_PassNoteContainsPassed(t *testing.T) {
 	deps, cfg := makeStepTraceDeps(t, "")
 
-	// Wire a fake PreSyncValidator that always passes (err=nil).
+	// Wire a fake PreSyncValidator that always passes (err=nil, empty output).
 	// fakePreSyncValidator is declared in orchestrator_test.go.
 	deps.PreSyncValidator = &fakePreSyncValidator{}
 
@@ -427,8 +428,28 @@ func TestStepTrace_PreSyncValidate_ActiveValidator_PassNoteContainsStatusPASS(t 
 	if strings.Contains(lc, "no-op") || strings.Contains(lc, "not enabled") {
 		t.Errorf("active-validator trace should NOT mention no-op; trace:\n%s", s.Trace)
 	}
-	if !strings.Contains(s.Trace, "PASS") {
-		t.Errorf("active-validator trace should contain 'PASS'; trace:\n%s", s.Trace)
+	if !strings.Contains(lc, "passed") {
+		t.Errorf("active-validator trace should contain 'passed'; trace:\n%s", s.Trace)
+	}
+}
+
+// TestStepTrace_PreSyncValidate_ActiveValidator_OutputInTrace asserts that when
+// an active PreSyncValidator returns non-empty output, the output appears in the
+// pre-sync-validate StepResult.Trace on the pass path.
+func TestStepTrace_PreSyncValidate_ActiveValidator_OutputInTrace(t *testing.T) {
+	deps, cfg := makeStepTraceDeps(t, "")
+
+	const jarOutput = "[INFO] Validator started\n[INFO] Rules check passed.\n"
+	deps.PreSyncValidator = &fakePreSyncValidator{output: jarOutput}
+
+	rpt := orchestrator.Run(context.Background(), deps, cfg)
+	if rpt.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %v", rpt.Status, stepNames(rpt))
+	}
+
+	s := findStep(t, rpt, "pre-sync-validate")
+	if !strings.Contains(s.Trace, "[INFO] Validator started") {
+		t.Errorf("pre-sync-validate Trace must contain validator output; trace:\n%s", s.Trace)
 	}
 }
 

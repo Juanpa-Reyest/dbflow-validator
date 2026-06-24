@@ -276,12 +276,15 @@ func TestOrchestrator_ReadinessTimeout(t *testing.T) {
 // ---- PreSyncValidator seam tests ----
 
 // fakePreSyncValidator is a controllable no-op or error-returning validator.
+// output is the string returned as the captured container log (mirrors the real
+// ContainerValidator.ValidatePreSync return value).
 type fakePreSyncValidator struct {
-	err error
+	output string
+	err    error
 }
 
-func (f *fakePreSyncValidator) ValidatePreSync(ctx context.Context, cloneRoot string) error {
-	return f.err
+func (f *fakePreSyncValidator) ValidatePreSync(_ context.Context, _ string) (string, error) {
+	return f.output, f.err
 }
 
 // TestOrchestrator_PreSyncValidator_NoOp verifies that a nil PreSyncValidator
@@ -334,6 +337,67 @@ func TestOrchestrator_PreSyncValidator_Failure(t *testing.T) {
 		t.Error("expected step 'pre-sync-validate' in report, not found")
 	} else if preValidStep.Status != domain.StepStatusFailed {
 		t.Errorf("expected pre-sync-validate FAILED, got %v", preValidStep.Status)
+	}
+}
+
+// TestOrchestrator_PreSyncValidator_OutputInTrace_Pass verifies that when the
+// validator returns a non-empty output on a passing run, that output appears in
+// the pre-sync-validate StepResult.Trace.
+func TestOrchestrator_PreSyncValidator_OutputInTrace_Pass(t *testing.T) {
+	deps := happyDeps(t)
+	const jarOutput = "[INFO] Validator started\n[INFO] Rules check passed.\n"
+	deps.PreSyncValidator = &fakePreSyncValidator{output: jarOutput}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Errorf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	var preValidStep *domain.StepResult
+	for i := range report.Steps {
+		if report.Steps[i].Name == "pre-sync-validate" {
+			preValidStep = &report.Steps[i]
+			break
+		}
+	}
+	if preValidStep == nil {
+		t.Fatal("expected step 'pre-sync-validate' in report, not found")
+	}
+	if !strings.Contains(preValidStep.Trace, "[INFO] Validator started") {
+		t.Errorf("pre-sync-validate Trace must contain validator output on PASS; trace: %q", preValidStep.Trace)
+	}
+}
+
+// TestOrchestrator_PreSyncValidator_OutputInTrace_Fail verifies that when the
+// validator returns a non-empty output on a failing run, that output appears in
+// the pre-sync-validate StepResult.Trace even on the failure path.
+func TestOrchestrator_PreSyncValidator_OutputInTrace_Fail(t *testing.T) {
+	deps := happyDeps(t)
+	const jarOutput = "[WARN] Violation found in N0001_DDL.sql\n"
+	deps.PreSyncValidator = &fakePreSyncValidator{
+		output: jarOutput,
+		err:    errors.New("SQL rules violation: missing rollback"),
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusFailed {
+		t.Errorf("expected FAILED, got %v", report.Status)
+	}
+
+	var preValidStep *domain.StepResult
+	for i := range report.Steps {
+		if report.Steps[i].Name == "pre-sync-validate" {
+			preValidStep = &report.Steps[i]
+			break
+		}
+	}
+	if preValidStep == nil {
+		t.Fatal("expected step 'pre-sync-validate' in report, not found")
+	}
+	if !strings.Contains(preValidStep.Trace, "[WARN] Violation found") {
+		t.Errorf("pre-sync-validate Trace must contain validator output on FAIL; trace: %q", preValidStep.Trace)
 	}
 }
 
