@@ -364,13 +364,72 @@ func findRealJAR(t *testing.T) string {
 	return import_path
 }
 
-// findRealCloneRoot returns the path to the real repo for integration PASS tests.
+// findRealCloneRoot builds a THROWAWAY clone-root copy (t.TempDir) seeded with the
+// real repo's ruleset and SQLInput. The integration test thus runs against real
+// data + the real JAR, but the JAR's -output writes into this temp dir — it must
+// NEVER write into the developer's actual repo (this mirrors the ephemeral clone
+// used in production, which is the only place the binary ever writes).
 func findRealCloneRoot(t *testing.T) string {
 	t.Helper()
-	cloneRoot := "/home/juanpabloreyestorres/Documentos/Documentos/FTT/Repos/gs-github/albatros/db-artifacts-scgolfcore"
-	rulesetPath := filepath.Join(cloneRoot, "src", "main", "resources", "Validator", "RulesContracts", "validation-rules.yaml")
-	if _, err := os.Stat(rulesetPath); err != nil {
-		t.Skipf("real clone root not found at %s; skipping", cloneRoot)
+	realRepo := "/home/juanpabloreyestorres/Documentos/Documentos/FTT/Repos/gs-github/albatros/db-artifacts-scgolfcore"
+	realRules := filepath.Join(realRepo, "src", "main", "resources", "Validator", "RulesContracts", "validation-rules.yaml")
+	realSQLInput := filepath.Join(realRepo, "src", "main", "resources", "SQLInput")
+	if _, err := os.Stat(realRules); err != nil {
+		t.Skipf("real ruleset not found at %s; skipping", realRules)
 	}
-	return cloneRoot
+
+	root := t.TempDir()
+	rulesetDir := filepath.Join(root, "src", "main", "resources", "Validator", "RulesContracts")
+	if err := os.MkdirAll(rulesetDir, 0o755); err != nil {
+		t.Fatalf("mkdir ruleset: %v", err)
+	}
+	copyFileForTest(t, realRules, filepath.Join(rulesetDir, "validation-rules.yaml"))
+
+	// The -output target dir (the JAR creates report/ subdirs under it).
+	if err := os.MkdirAll(filepath.Join(root, "src", "main", "resources", "Validator", "outputReport"), 0o755); err != nil {
+		t.Fatalf("mkdir outputReport: %v", err)
+	}
+
+	// Seed the real SQL files so the validator has real input to validate.
+	dstSQL := filepath.Join(root, "src", "main", "resources", "SQLInput")
+	if err := os.MkdirAll(dstSQL, 0o755); err != nil {
+		t.Fatalf("mkdir SQLInput: %v", err)
+	}
+	if _, err := os.Stat(realSQLInput); err == nil {
+		copyDirForTest(t, realSQLInput, dstSQL)
+	}
+	return root
+}
+
+// copyFileForTest copies a single file (test helper).
+func copyFileForTest(t *testing.T, src, dst string) {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read %s: %v", src, err)
+	}
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		t.Fatalf("write %s: %v", dst, err)
+	}
+}
+
+// copyDirForTest recursively copies a directory tree (test helper).
+func copyDirForTest(t *testing.T, src, dst string) {
+	t.Helper()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("readdir %s: %v", src, err)
+	}
+	for _, e := range entries {
+		s := filepath.Join(src, e.Name())
+		d := filepath.Join(dst, e.Name())
+		if e.IsDir() {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", d, err)
+			}
+			copyDirForTest(t, s, d)
+		} else {
+			copyFileForTest(t, s, d)
+		}
+	}
 }
