@@ -1,48 +1,107 @@
 name: Release
 
+# Publishes a multi-OS release automatically when a version bump lands on main.
+# A merge into main only releases if the VERSION file changed in that push; merges
+# that do NOT change VERSION are ignored, so main never produces a phantom release.
+#
+# Flow: bump VERSION in a PR -> merge to main -> this workflow tags v<VERSION>,
+# cross-compiles all four binaries, generates the changelog from the merged PRs,
+# and publishes the GitHub Release.
+#
+# Release attribution: every release step authenticates with RELEASE_TOKEN when
+# that secret exists (a fine-grained PAT with Contents: read & write), so releases
+# are attributed to its owner; otherwise it falls back to the automatic
+# GITHUB_TOKEN (released as github-actions[bot]).
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+  workflow_dispatch: {}
 
 permissions:
-  contents: write
-  packages: read
+  contents: read
 
 jobs:
-  release:
+  check-version:
     runs-on: ubuntu-latest
-
+    outputs:
+      should_release: ${{ steps.detect.outputs.should_release }}
+      version: ${{ steps.detect.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # need HEAD~1 to diff the VERSION file
+
+      - name: Detect a version bump
+        id: detect
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual run -> releasing v$VERSION"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git show HEAD~1:VERSION > /tmp/prev-version 2>/dev/null; then
+            PREV="$(tr -d '[:space:]' < /tmp/prev-version)"
+          else
+            PREV="none"
+          fi
+          if [ "$VERSION" != "$PREV" ]; then
+            echo "Version changed $PREV -> $VERSION; releasing."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No version change ($VERSION); skipping release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the tag + GitHub Release
+      packages: read # `make vendor` fetches the embedded jars
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the changelog can diff against the last tag
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: "1.25"
 
-      - name: Fetch plugin jar from GitHub Packages
+      - name: Fetch embedded jars from GitHub Packages
         run: make vendor
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build all binaries
-        run: make build-all
+        run: make build-all VERSION=v${{ needs.check-version.outputs.version }}
 
       - name: Generate checksums
         working-directory: dist
         run: sha256sum dbflow-validator-linux-amd64 dbflow-validator-darwin-amd64 dbflow-validator-darwin-arm64 dbflow-validator-windows-amd64.exe > SHA256SUMS.txt
 
-      - name: Create GitHub Release
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          VERSION="v${{ needs.check-version.outputs.version }}"
+          # Auto-generate notes from the PRs/commits since the previous release;
+          # fall back to a minimal note if generation fails (e.g. first release).
+          gh api "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="$VERSION" \
+            -f target_commitish="${{ github.sha }}" \
+            --jq '.body' > /tmp/release-notes.md 2>/dev/null || echo "Release $VERSION" > /tmp/release-notes.md
+          gh release create "$VERSION" \
             dist/dbflow-validator-linux-amd64 \
             dist/dbflow-validator-darwin-amd64 \
             dist/dbflow-validator-darwin-arm64 \
             dist/dbflow-validator-windows-amd64.exe \
             dist/SHA256SUMS.txt \
-            --title "$GITHUB_REF_NAME" \
-            --notes "Download the binary for your OS (linux-amd64, darwin-arm64, darwin-amd64, or windows-amd64.exe), make it executable, and run it. Requires Docker and Git."
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            --title "$VERSION" \
+            --notes-file /tmp/release-notes.md \
+            --latest
