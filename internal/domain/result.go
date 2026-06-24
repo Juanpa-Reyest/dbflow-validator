@@ -24,6 +24,28 @@ const (
 	StepStatusAborted StepStatus = "ABORTED"
 )
 
+// CommandTrace carries the exact (redacted) command line and captured combined
+// stdout+stderr output produced by a single external command invocation.
+// Adapters that shell out fill this struct and return it; the orchestrator
+// applies ScrubSecrets and renders it into StepResult.Trace.
+type CommandTrace struct {
+	// Command is the exact command line that was executed, with any secret values
+	// already redacted by the adapter before building this struct.
+	Command string
+	// Output is the combined stdout+stderr captured from the command, verbatim.
+	// The orchestrator applies ScrubSecrets before writing this into Trace.
+	Output string
+}
+
+// PropChange records a before→after change to a single key in liquibase.properties.
+// Sensitive values (password) must be replaced with "[REDACTED]" before the
+// orchestrator stores this in StepResult.Trace.
+type PropChange struct {
+	Key    string
+	Before string
+	After  string
+}
+
 // StepResult holds the outcome, timing, and trace for one validation step.
 type StepResult struct {
 	Name       string        `json:"name"`

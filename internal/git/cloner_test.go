@@ -31,7 +31,7 @@ func TestGitCloner_TokenRedaction(t *testing.T) {
 			DestDir: filepath.Join(dir, "clone"),
 		}
 
-		_, err := cloner.Clone(context.Background(), opts)
+		_, _, err := cloner.Clone(context.Background(), opts)
 		if err == nil {
 			t.Fatal("expected clone to fail with fakeExec returning false")
 		}
@@ -58,7 +58,7 @@ func TestGitCloner_TokenRedaction(t *testing.T) {
 			DestDir: destDir,
 		}
 
-		_, _ = cloner.Clone(context.Background(), opts)
+		_, _, _ = cloner.Clone(context.Background(), opts)
 
 		info, err := os.Stat(destDir)
 		if err != nil {
@@ -87,7 +87,7 @@ func TestGitCloner_TokenRedaction(t *testing.T) {
 			DestDir: filepath.Join(dir, "clone"),
 		}
 
-		_, _ = cloner.Clone(context.Background(), opts)
+		_, _, _ = cloner.Clone(context.Background(), opts)
 
 		// The authenticated URL must contain the token (passed to git, never to a logger).
 		foundToken := false
@@ -121,7 +121,7 @@ func TestGitCloner_SSH(t *testing.T) {
 			Token:   domain.NewSecret(""), // no token for SSH
 			DestDir: filepath.Join(dir, "clone"),
 		}
-		_, _ = cloner.Clone(context.Background(), opts)
+		_, _, _ = cloner.Clone(context.Background(), opts)
 
 		// The URL passed to git must be the original SSH URL — no token injection.
 		found := false
@@ -155,7 +155,7 @@ func TestGitCloner_SSH(t *testing.T) {
 			Token:   domain.NewSecret(""),
 			DestDir: filepath.Join(dir, "clone"),
 		}
-		_, _ = cloner.Clone(context.Background(), opts)
+		_, _, _ = cloner.Clone(context.Background(), opts)
 
 		for _, arg := range capturedArgs {
 			if strings.Contains(arg, "x-access-token") {
@@ -178,7 +178,7 @@ func TestGitCloner_SSH(t *testing.T) {
 			Token:   domain.NewSecret(""),
 			DestDir: filepath.Join(dir, "clone"),
 		}
-		_, err := cloner.Clone(context.Background(), opts)
+		_, _, err := cloner.Clone(context.Background(), opts)
 		if err == nil {
 			t.Fatal("expected clone to fail")
 		}
@@ -206,7 +206,7 @@ func TestGitCloner_SSH(t *testing.T) {
 			Token:   domain.NewSecret("secret-token"),
 			DestDir: filepath.Join(dir, "clone"),
 		}
-		_, err := cloner.Clone(context.Background(), opts)
+		_, _, err := cloner.Clone(context.Background(), opts)
 		if err == nil {
 			t.Fatal("expected clone to fail")
 		}
@@ -242,7 +242,7 @@ func TestClone_SurfacesGitStderr(t *testing.T) {
 		DestDir: filepath.Join(dir, "clone"),
 	}
 
-	_, err := cloner.Clone(context.Background(), opts)
+	_, trace, err := cloner.Clone(context.Background(), opts)
 	if err == nil {
 		t.Fatal("expected Clone to fail with fakeExec returning non-zero")
 	}
@@ -261,6 +261,99 @@ func TestClone_SurfacesGitStderr(t *testing.T) {
 	injectedURL := "https://x-access-token:" + rawToken + "@github.com/example/repo.git"
 	if strings.Contains(errStr, injectedURL) {
 		t.Errorf("injected realURL with token found in error message: %v", errStr)
+	}
+
+	// CommandTrace.Output must contain the captured stderr text.
+	if !strings.Contains(trace.Output, knownStderr) {
+		t.Errorf("CommandTrace.Output must contain stderr text %q; got: %q", knownStderr, trace.Output)
+	}
+	// CommandTrace.Command must NOT contain the raw token.
+	if strings.Contains(trace.Command, rawToken) {
+		t.Errorf("CommandTrace.Command must not contain raw token; got: %q", trace.Command)
+	}
+}
+
+// TestClone_CommandTrace_NoTokenLeak verifies that CommandTrace.Command and
+// CommandTrace.Output never contain the raw HTTPS token on either success or failure.
+func TestClone_CommandTrace_NoTokenLeak(t *testing.T) {
+	const rawToken = "ghp_secretToken_neverInTrace"
+
+	tests := []struct {
+		name    string
+		execFn  func(ctx context.Context, name string, args ...string) *exec.Cmd
+		wantErr bool
+	}{
+		{
+			name: "success path: token never in trace",
+			execFn: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				return exec.CommandContext(ctx, "true")
+			},
+			wantErr: false,
+		},
+		{
+			name: "failure path: token never in trace",
+			execFn: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				return exec.CommandContext(ctx, "false")
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cloner := internalgit.NewCloner(tt.execFn, os.MkdirAll)
+
+			opts := domain.CloneOptions{
+				RepoURL: "https://github.com/example/repo.git",
+				Branch:  "main",
+				Token:   domain.NewSecret(rawToken),
+				DestDir: filepath.Join(dir, "clone"),
+			}
+
+			_, trace, _ := cloner.Clone(context.Background(), opts)
+
+			if strings.Contains(trace.Command, rawToken) {
+				t.Errorf("raw token found in CommandTrace.Command: %q", trace.Command)
+			}
+			if strings.Contains(trace.Output, rawToken) {
+				t.Errorf("raw token found in CommandTrace.Output: %q", trace.Output)
+			}
+			// The command must contain the branch and "git clone" signature.
+			if !strings.Contains(trace.Command, "git clone") {
+				t.Errorf("CommandTrace.Command must contain 'git clone'; got: %q", trace.Command)
+			}
+			if !strings.Contains(trace.Command, "main") {
+				t.Errorf("CommandTrace.Command must contain branch 'main'; got: %q", trace.Command)
+			}
+		})
+	}
+}
+
+// TestClone_CommandTrace_SSHSuccess verifies the CommandTrace on a successful SSH clone.
+func TestClone_CommandTrace_SSHSuccess(t *testing.T) {
+	fakeExec := func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "echo 'Cloning into dest...'; echo 'HEAD is now at abc1234 init commit'")
+	}
+
+	dir := t.TempDir()
+	cloner := internalgit.NewCloner(fakeExec, os.MkdirAll)
+
+	opts := domain.CloneOptions{
+		RepoURL: "git@github.com:org/repo.git",
+		Branch:  "main",
+		Token:   domain.NewSecret(""),
+		DestDir: filepath.Join(dir, "clone"),
+	}
+
+	_, trace, _ := cloner.Clone(context.Background(), opts)
+
+	if !strings.Contains(trace.Command, "git@github.com:org/repo.git") {
+		t.Errorf("SSH URL must appear verbatim in CommandTrace.Command; got: %q", trace.Command)
+	}
+	// No x-access-token in the command.
+	if strings.Contains(trace.Command, "x-access-token") {
+		t.Errorf("x-access-token must not appear in SSH CommandTrace.Command; got: %q", trace.Command)
 	}
 }
 
@@ -314,7 +407,7 @@ func TestGitCloner_Integration(t *testing.T) {
 		DestDir: filepath.Join(destDir, "clone"),
 	}
 
-	cloneRoot, err := cloner.Clone(context.Background(), opts)
+	cloneRoot, trace, err := cloner.Clone(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("Clone error: %v", err)
 	}
@@ -323,5 +416,15 @@ func TestGitCloner_Integration(t *testing.T) {
 	propsPath := filepath.Join(cloneRoot, "src", "main", "resources", "db", "liquibase.properties")
 	if _, err := os.Stat(propsPath); err != nil {
 		t.Errorf("expected liquibase.properties at %s: %v", propsPath, err)
+	}
+
+	// CommandTrace must carry the real git command and output.
+	if !strings.Contains(trace.Command, "git clone") {
+		t.Errorf("integration: CommandTrace.Command must contain 'git clone'; got: %q", trace.Command)
+	}
+	// For a local clone git still prints progress/clone text to stderr.
+	// Output may be empty for silent local clones; just ensure no token leaks.
+	if strings.Contains(trace.Output, "x-access-token") {
+		t.Errorf("integration: token injection must not appear in CommandTrace.Output; got: %q", trace.Output)
 	}
 }

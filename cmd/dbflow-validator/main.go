@@ -25,6 +25,7 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/container"
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
 	"github.com/dbflow-validator/dbflow-validator/internal/embedrepo"
+	"github.com/dbflow-validator/dbflow-validator/internal/embedvalidator"
 	"github.com/dbflow-validator/dbflow-validator/internal/engine"
 	"github.com/dbflow-validator/dbflow-validator/internal/git"
 	"github.com/dbflow-validator/dbflow-validator/internal/liquibase"
@@ -35,6 +36,7 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/preflight"
 	"github.com/dbflow-validator/dbflow-validator/internal/report"
 	"github.com/dbflow-validator/dbflow-validator/internal/rundir"
+	"github.com/dbflow-validator/dbflow-validator/internal/rulesvalidator"
 )
 
 // buildVersion is injected at link time via -ldflags "-X main.buildVersion=<version>".
@@ -227,6 +229,17 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 	}
 
 	uid, gid := hostUIDGID()
+
+	// Extract embedded validator JAR to the per-version user cache directory.
+	// Fail-CLOSED: if extraction fails the run aborts with a clear error rather
+	// than silently disabling the gate (which would violate the fail-safe principle).
+	validatorJARPath, jarErr := resolveEmbeddedValidatorJar()
+	if jarErr != nil {
+		fmt.Fprintf(os.Stderr, "dbflow-validator: cannot extract embedded validator JAR — aborting to preserve fail-safe gate: %v\n", jarErr)
+		fmt.Fprintf(os.Stderr, "dbflow-validator: tip: ensure the binary was built with //go:embed assets and the cache directory is writable (%s)\n", defaultCacheRoot())
+		return 2
+	}
+
 	// Build the Maven container runner with an empty network name — the orchestrator
 	// will call SetNetworkName on it after the network is created at container-start.
 	mavenRunner := maven.NewContainerRunner(maven.DefaultImage, "", mavenRepoCachePath, uid, gid)
@@ -259,6 +272,16 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 		// This keeps the console quiet (no slog logfmt) while still showing activity.
 		OnStep: consoleProgressPrinter(os.Stdout),
 	}
+
+	// Wire the concrete PreSyncValidator. validatorJARPath is guaranteed non-empty
+	// here because extraction failure aborts the run above (fail-CLOSED gate).
+	deps.PreSyncValidator = rulesvalidator.New(
+		maven.DefaultImage, validatorJARPath, uid, gid, nil,
+		// Route the validator container's stdout/stderr to execution.log (same
+		// sink as Maven), so the JAR's output is always kept as evidence — on a
+		// passing run and, crucially, on a failing one for diagnosis.
+		rulesvalidator.WithValidatorOut(mavenOut),
+	)
 
 	// --- 6. Run orchestration ---
 	rpt := orchestrator.Run(ctx, deps, cfg)
@@ -434,4 +457,25 @@ func consoleProgressPrinter(w io.Writer) func(orchestrator.StepEvent) {
 		}
 		fmt.Fprintf(w, "  ▸ %s … %s\n", e.Name, result)
 	}
+}
+
+// resolveValidatorJarWith extracts the embedded SQL rules validator JAR using the
+// provided extractor function and returns the path or an error (fail-CLOSED).
+//
+// This is the testable core: production callers pass embedvalidator.EnsureExtracted;
+// tests can inject a stub that simulates extraction failure.
+func resolveValidatorJarWith(extractor func(cacheRoot, version string) (string, error), cacheRoot, version string) (string, error) {
+	return extractor(cacheRoot, version)
+}
+
+// resolveEmbeddedValidatorJar extracts the embedded SQL rules validator JAR to
+// the per-version user cache directory and returns the extraction path.
+//
+// Cache location: ~/.cache/dbflow-validator/<buildVersion>/validator/validator.jar
+//
+// On failure an error is returned — the caller MUST abort rather than silently
+// fall back to the no-op gate, preserving the fail-safe principle.
+func resolveEmbeddedValidatorJar() (string, error) {
+	cacheRoot := defaultCacheRoot()
+	return resolveValidatorJarWith(embedvalidator.EnsureExtracted, cacheRoot, buildVersion)
 }

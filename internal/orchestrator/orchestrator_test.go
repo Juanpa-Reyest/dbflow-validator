@@ -53,12 +53,13 @@ func (f *fakePreflight) Check(_ context.Context) ([]domain.ToolStatus, error) {
 }
 
 type fakeCloner struct {
-	root string
-	err  error
+	root  string
+	trace domain.CommandTrace
+	err   error
 }
 
-func (f *fakeCloner) Clone(_ context.Context, _ domain.CloneOptions) (string, error) {
-	return f.root, f.err
+func (f *fakeCloner) Clone(_ context.Context, _ domain.CloneOptions) (string, domain.CommandTrace, error) {
+	return f.root, f.trace, f.err
 }
 
 type fakeContainerProvider struct {
@@ -88,9 +89,14 @@ func (f *fakeDatabaseProvider) ContainerProvider() domain.ContainerProvider     
 func (f *fakeDatabaseProvider) DSN(coords domain.ContainerCoords) string           { return "postgres://fake" }
 func (f *fakeDatabaseProvider) Ping(_ context.Context, _ string) error             { return f.pingErr }
 
-type fakePatcher struct{ err error }
+type fakePatcher struct {
+	changes []domain.PropChange
+	err     error
+}
 
-func (f *fakePatcher) Patch(_ string, _ domain.ContainerCoords) error { return f.err }
+func (f *fakePatcher) Patch(_ string, _ domain.ContainerCoords) ([]domain.PropChange, error) {
+	return f.changes, f.err
+}
 
 type fakeEngineDetector struct {
 	engine string
@@ -276,12 +282,15 @@ func TestOrchestrator_ReadinessTimeout(t *testing.T) {
 // ---- PreSyncValidator seam tests ----
 
 // fakePreSyncValidator is a controllable no-op or error-returning validator.
+// output is the string returned as the captured container log (mirrors the real
+// ContainerValidator.ValidatePreSync return value).
 type fakePreSyncValidator struct {
-	err error
+	output string
+	err    error
 }
 
-func (f *fakePreSyncValidator) ValidatePreSync(ctx context.Context, cloneRoot string) error {
-	return f.err
+func (f *fakePreSyncValidator) ValidatePreSync(_ context.Context, _ string) (string, error) {
+	return f.output, f.err
 }
 
 // TestOrchestrator_PreSyncValidator_NoOp verifies that a nil PreSyncValidator
@@ -337,18 +346,79 @@ func TestOrchestrator_PreSyncValidator_Failure(t *testing.T) {
 	}
 }
 
+// TestOrchestrator_PreSyncValidator_OutputInTrace_Pass verifies that when the
+// validator returns a non-empty output on a passing run, that output appears in
+// the pre-sync-validate StepResult.Trace.
+func TestOrchestrator_PreSyncValidator_OutputInTrace_Pass(t *testing.T) {
+	deps := happyDeps(t)
+	const jarOutput = "[INFO] Validator started\n[INFO] Rules check passed.\n"
+	deps.PreSyncValidator = &fakePreSyncValidator{output: jarOutput}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Errorf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	var preValidStep *domain.StepResult
+	for i := range report.Steps {
+		if report.Steps[i].Name == "pre-sync-validate" {
+			preValidStep = &report.Steps[i]
+			break
+		}
+	}
+	if preValidStep == nil {
+		t.Fatal("expected step 'pre-sync-validate' in report, not found")
+	}
+	if !strings.Contains(preValidStep.Trace, "[INFO] Validator started") {
+		t.Errorf("pre-sync-validate Trace must contain validator output on PASS; trace: %q", preValidStep.Trace)
+	}
+}
+
+// TestOrchestrator_PreSyncValidator_OutputInTrace_Fail verifies that when the
+// validator returns a non-empty output on a failing run, that output appears in
+// the pre-sync-validate StepResult.Trace even on the failure path.
+func TestOrchestrator_PreSyncValidator_OutputInTrace_Fail(t *testing.T) {
+	deps := happyDeps(t)
+	const jarOutput = "[WARN] Violation found in N0001_DDL.sql\n"
+	deps.PreSyncValidator = &fakePreSyncValidator{
+		output: jarOutput,
+		err:    errors.New("SQL rules violation: missing rollback"),
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusFailed {
+		t.Errorf("expected FAILED, got %v", report.Status)
+	}
+
+	var preValidStep *domain.StepResult
+	for i := range report.Steps {
+		if report.Steps[i].Name == "pre-sync-validate" {
+			preValidStep = &report.Steps[i]
+			break
+		}
+	}
+	if preValidStep == nil {
+		t.Fatal("expected step 'pre-sync-validate' in report, not found")
+	}
+	if !strings.Contains(preValidStep.Trace, "[WARN] Violation found") {
+		t.Errorf("pre-sync-validate Trace must contain validator output on FAIL; trace: %q", preValidStep.Trace)
+	}
+}
+
 // ---- Overlay step tests (Phase 5) ----
 
 // fakeOverlayer records calls and returns a controllable result.
 type fakeOverlayer struct {
 	called bool
-	copied int
+	paths  []string
 	err    error
 }
 
-func (f *fakeOverlayer) Apply(_, _ string) (int, error) {
+func (f *fakeOverlayer) Apply(_, _ string) ([]string, error) {
 	f.called = true
-	return f.copied, f.err
+	return f.paths, f.err
 }
 
 // makeHappyDepsWithSQLInput creates happyDeps pre-populated with a temp SQLInput dir
@@ -370,7 +440,7 @@ func makeHappyDepsWithSQLInput(t *testing.T) (orchestrator.Deps, config.Config, 
 // step appears in Steps between "engine-guard" and "container-start".
 func TestRun_OverlayStep_Wired(t *testing.T) {
 	deps, cfg, _ := makeHappyDepsWithSQLInput(t)
-	ol := &fakeOverlayer{copied: 1}
+	ol := &fakeOverlayer{paths: []string{"/fake/dest/a.sql"}}
 	deps.Overlayer = ol
 
 	report := orchestrator.Run(context.Background(), deps, cfg)
@@ -554,12 +624,13 @@ func TestOrchestrator_MavenOut_NilFallsToDiscard(t *testing.T) {
 type mockCloner struct {
 	called bool
 	root   string
+	trace  domain.CommandTrace
 	err    error
 }
 
-func (m *mockCloner) Clone(_ context.Context, _ domain.CloneOptions) (string, error) {
+func (m *mockCloner) Clone(_ context.Context, _ domain.CloneOptions) (string, domain.CommandTrace, error) {
 	m.called = true
-	return m.root, m.err
+	return m.root, m.trace, m.err
 }
 
 // TestRun_InputCheck_MissingSQLInput verifies that when cfg.SQLInputPath does not
@@ -644,5 +715,284 @@ func TestRun_InputCheck_EmptyDir(t *testing.T) {
 	// Must not contain Maven output.
 	if strings.Contains(inputStep.Error, "BUILD FAILURE") {
 		t.Error("error must not contain Maven BUILD FAILURE output")
+	}
+}
+
+// ---- Clone trace tests (Slice 2 — AC-1, AC-2, AC-3, AC-4, AC-19) ----
+
+// TestOrchestrator_CloneTrace_ContainsCommandAndOutput verifies that on a happy-path run
+// the clone step's Trace contains both the redacted command line and the captured output
+// returned by the Cloner (AC-1, AC-2).
+func TestOrchestrator_CloneTrace_ContainsCommandAndOutput(t *testing.T) {
+	deps := happyDeps(t)
+	cloneRoot := deps.Cloner.(*fakeCloner).root
+	deps.Cloner = &fakeCloner{
+		root: cloneRoot,
+		trace: domain.CommandTrace{
+			Command: "git clone --branch main --depth 1 https://example.com/repo.git /tmp/dest",
+			Output:  "Cloning into '/tmp/dest'...\nHEAD is now at abc1234 init",
+		},
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	cloneStep := findStep(t, report, "clone")
+
+	// AC-1: Trace must contain the redacted command line.
+	if !strings.Contains(cloneStep.Trace, "git clone") {
+		t.Errorf("clone Trace must contain command line; trace: %q", cloneStep.Trace)
+	}
+	// AC-2: Trace must contain the captured git output.
+	if !strings.Contains(cloneStep.Trace, "Cloning into") {
+		t.Errorf("clone Trace must contain captured git output; trace: %q", cloneStep.Trace)
+	}
+	// AC-3 (HEAD sha): Trace must contain the HEAD line extracted from output.
+	if !strings.Contains(cloneStep.Trace, "HEAD is now at") {
+		t.Errorf("clone Trace must contain HEAD sha line; trace: %q", cloneStep.Trace)
+	}
+}
+
+// TestOrchestrator_CloneTrace_TokenNotLeaked verifies that the git token never
+// appears in the clone step's Trace even when the fakeCloner returns a trace
+// that would normally contain it (AC-4).
+func TestOrchestrator_CloneTrace_TokenNotLeaked(t *testing.T) {
+	const rawToken = "ghp_super_secret_token_xyz"
+
+	deps := happyDeps(t)
+	cloneRoot := deps.Cloner.(*fakeCloner).root
+	deps.Cloner = &fakeCloner{
+		root: cloneRoot,
+		trace: domain.CommandTrace{
+			// Simulate a badly-formed trace from a buggy adapter that somehow
+			// still included the token — ScrubSecrets at the orchestrator boundary
+			// must catch it before it reaches StepResult.Trace.
+			Command: "git clone --depth 1 https://x-access-token:" + rawToken + "@github.com/org/repo.git /dest",
+			Output:  "Cloning... token=" + rawToken,
+		},
+	}
+
+	cfg := testCfg()
+	cfg.Token = domain.NewSecret(rawToken)
+
+	report := orchestrator.Run(context.Background(), deps, cfg)
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	cloneStep := findStep(t, report, "clone")
+	// AC-4: Raw token must never appear in the trace.
+	if strings.Contains(cloneStep.Trace, rawToken) {
+		t.Errorf("raw token found in clone Trace — ScrubSecrets did not run: %q", cloneStep.Trace)
+	}
+}
+
+// TestOrchestrator_CloneFailure_TraceIncludesCapturedOutput verifies that when
+// Clone fails, the clone step's Trace includes the captured output from the
+// Cloner's CommandTrace (AC-19: clone failure still fires fail — no semantic change).
+func TestOrchestrator_CloneFailure_TraceIncludesCapturedOutput(t *testing.T) {
+	deps := happyDeps(t)
+	deps.Cloner = &fakeCloner{
+		trace: domain.CommandTrace{
+			Command: "git clone --branch main --depth 1 https://example.com/repo.git /dest",
+			Output:  "fatal: repository not found",
+		},
+		err: errors.New("repository clone failed: git clone https://example.com/repo.git: exit status 128: fatal: repository not found"),
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusFailed {
+		t.Fatalf("expected FAILED, got %v", report.Status)
+	}
+
+	cloneStep := findStep(t, report, "clone")
+	if cloneStep.Status != domain.StepStatusFailed {
+		t.Errorf("expected clone step FAILED, got %v", cloneStep.Status)
+	}
+	// The step trace must carry the captured git output on failure.
+	if !strings.Contains(cloneStep.Trace, "fatal: repository not found") {
+		t.Errorf("clone failure Trace must contain captured output; trace: %q", cloneStep.Trace)
+	}
+}
+
+// ---- Readiness-probe trace tests (Slice 4 — AC-9, AC-10) ----
+
+// TestOrchestrator_ReadinessProbeTrace_ContainsAttempts verifies that on the
+// happy path the readiness-probe Trace contains the probe expression and attempt
+// count (AC-9).
+func TestOrchestrator_ReadinessProbeTrace_ContainsAttempts(t *testing.T) {
+	deps := happyDeps(t)
+	// pingErr=nil → WaitReady succeeds on the first attempt.
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	readinessStep := findStep(t, report, "readiness-probe")
+	// AC-9: Trace must contain the probe expression.
+	if !strings.Contains(readinessStep.Trace, "SELECT 1") {
+		t.Errorf("readiness-probe Trace must contain probe expression 'SELECT 1'; trace: %q", readinessStep.Trace)
+	}
+	// AC-9: Trace must contain attempt count.
+	if !strings.Contains(readinessStep.Trace, "attempts") {
+		t.Errorf("readiness-probe Trace must contain attempt count; trace: %q", readinessStep.Trace)
+	}
+}
+
+// TestOrchestrator_ReadinessProbeTrace_ContainsErrorOnTimeout verifies that when
+// the readiness probe times out, the step Trace contains the real driver error
+// message (AC-10).
+func TestOrchestrator_ReadinessProbeTrace_ContainsErrorOnTimeout(t *testing.T) {
+	const probeErrMsg = "dial tcp: connection refused"
+	deps := happyDeps(t)
+	deps.DBProvider = &fakeDatabaseProvider{
+		provider: &fakeContainerProvider{
+			coords: domain.ContainerCoords{Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", DBName: "db"},
+		},
+		pingErr: errors.New(probeErrMsg),
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusFailed {
+		t.Fatalf("expected FAILED, got %v", report.Status)
+	}
+
+	readinessStep := findStep(t, report, "readiness-probe")
+	if readinessStep.Status != domain.StepStatusFailed {
+		t.Errorf("expected readiness-probe FAILED, got %v", readinessStep.Status)
+	}
+	// AC-10: Real driver error must appear in the Trace.
+	if !strings.Contains(readinessStep.Trace, probeErrMsg) {
+		t.Errorf("readiness-probe Trace must contain real driver error %q; trace: %q", probeErrMsg, readinessStep.Trace)
+	}
+	// AC-9: Trace must contain attempt count.
+	if !strings.Contains(readinessStep.Trace, "attempts") {
+		t.Errorf("readiness-probe Trace must contain attempt count; trace: %q", readinessStep.Trace)
+	}
+}
+
+// ---- Pre-sync-validate no-op label test (Slice 5 — AC-20) ----
+
+// TestOrchestrator_PreSyncValidate_NoOp_ExplicitLabel verifies that when
+// PreSyncValidator is nil (no-op path), the pre-sync-validate Trace contains
+// the explicit "no-op seam active" label (AC-20).
+func TestOrchestrator_PreSyncValidate_NoOp_ExplicitLabel(t *testing.T) {
+	deps := happyDeps(t)
+	deps.PreSyncValidator = nil // no-op path
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	preSyncStep := findStep(t, report, "pre-sync-validate")
+	// AC-20: no-op trace must contain the explicit label.
+	if !strings.Contains(preSyncStep.Trace, "no-op seam active") {
+		t.Errorf("pre-sync-validate no-op Trace must contain 'no-op seam active'; trace: %q", preSyncStep.Trace)
+	}
+}
+
+// TestOrchestrator_ContainerStart_TraceContainsContainerID verifies that when
+// ContainerCoords.ContainerID is set, the container-start step Trace includes it
+// (AC-8).
+func TestOrchestrator_ContainerStart_TraceContainsContainerID(t *testing.T) {
+	const fakeContainerID = "abc123def456"
+	deps := happyDeps(t)
+	deps.DBProvider = &fakeDatabaseProvider{
+		provider: &fakeContainerProvider{
+			coords: domain.ContainerCoords{
+				Host:        "127.0.0.1",
+				Port:        5432,
+				User:        "u",
+				Password:    "p",
+				DBName:      "db",
+				ContainerID: fakeContainerID,
+			},
+		},
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	containerStep := findStep(t, report, "container-start")
+	// AC-8: container-start Trace must include the container ID when provided.
+	if !strings.Contains(containerStep.Trace, fakeContainerID) {
+		t.Errorf("container-start Trace must contain ContainerID %q; trace: %q", fakeContainerID, containerStep.Trace)
+	}
+}
+
+// ---- Properties-patch trace tests (Slice 6c — AC-14, AC-15) ----
+
+// TestOrchestrator_PropertiesPatch_TraceContainsChanges verifies that when
+// the patcher returns PropChange entries, the properties-patch Trace reflects
+// the before→after changes (AC-14).
+func TestOrchestrator_PropertiesPatch_TraceContainsChanges(t *testing.T) {
+	deps := happyDeps(t)
+	const fakeURL = "jdbc:postgresql://127.0.0.1:5432/testdb"
+	deps.Patcher = &fakePatcher{
+		changes: []domain.PropChange{
+			{Key: "url", Before: "jdbc:oracle:old", After: fakeURL},
+			{Key: "username", Before: "old_user", After: "lb_test"},
+			{Key: "password", Before: "old_pass", After: "secret123"},
+			{Key: "driver", Before: "oracle.jdbc.OracleDriver", After: "org.postgresql.Driver"},
+		},
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	patchStep := findStep(t, report, "properties-patch")
+	// AC-14: Trace must contain key names and after-values (url at minimum).
+	if !strings.Contains(patchStep.Trace, "url") {
+		t.Errorf("properties-patch Trace must contain key 'url'; trace: %q", patchStep.Trace)
+	}
+	if !strings.Contains(patchStep.Trace, "jdbc:postgresql") {
+		t.Errorf("properties-patch Trace must contain new JDBC URL; trace: %q", patchStep.Trace)
+	}
+}
+
+// TestOrchestrator_PropertiesPatch_PasswordNotInTrace verifies that the raw
+// password value never appears in the properties-patch Trace (AC-15).
+func TestOrchestrator_PropertiesPatch_PasswordNotInTrace(t *testing.T) {
+	const rawPassword = "super_secret_pass_xyz"
+	deps := happyDeps(t)
+	deps.Patcher = &fakePatcher{
+		changes: []domain.PropChange{
+			{Key: "url", Before: "old", After: "jdbc:postgresql://127.0.0.1:5432/db"},
+			{Key: "username", Before: "old", After: "lb_test"},
+			{Key: "password", Before: "old_pass", After: rawPassword},
+			{Key: "driver", Before: "old", After: "org.postgresql.Driver"},
+		},
+	}
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	patchStep := findStep(t, report, "properties-patch")
+	// AC-15: Raw password must NEVER appear in the trace.
+	if strings.Contains(patchStep.Trace, rawPassword) {
+		t.Errorf("raw password %q leaked into properties-patch Trace; trace: %q", rawPassword, patchStep.Trace)
+	}
+	// Trace must show [REDACTED] instead.
+	if !strings.Contains(patchStep.Trace, "[REDACTED]") {
+		t.Errorf("properties-patch Trace must contain [REDACTED] for password; trace: %q", patchStep.Trace)
 	}
 }

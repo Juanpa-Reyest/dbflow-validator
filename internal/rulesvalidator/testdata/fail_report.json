@@ -1,0 +1,152 @@
+{
+  "globalSummary" : {
+    "totalFiles" : 1,
+    "summaryMetrics" : {
+      "evaluated" : 9,
+      "passed" : 1,
+      "violated" : 8,
+      "coverage" : 11.11,
+      "violationsBySeverity" : {
+        "blocker" : 3,
+        "critical" : 1,
+        "major" : 0,
+        "minor" : 4,
+        "info" : 0
+      }
+    },
+    "status" : "FAIL",
+    "ruleSetMetadata" : {
+      "id" : "CORE_MX_POSTGRES",
+      "language" : "es-MX",
+      "version" : "1.0",
+      "rulesConfigured" : 32,
+      "codeRange" : "[1, 300]",
+      "sourceFilePath" : "/work/src/main/resources/Validator/RulesContracts/validation-rules.yaml",
+      "severityLevels" : {
+        "blocker" : {
+          "weight" : 32.0,
+          "penalty_factor" : 0.5
+        },
+        "critical" : {
+          "weight" : 16.0,
+          "penalty_factor" : 0.85
+        },
+        "major" : {
+          "weight" : 8.0,
+          "penalty_factor" : 0.95
+        },
+        "minor" : {
+          "weight" : 4.0,
+          "penalty_factor" : 1.0
+        },
+        "info" : {
+          "weight" : 2.0,
+          "penalty_factor" : 1.0
+        }
+      },
+      "analysisStatus" : {
+        "pass" : {
+          "threshold" : 100.0
+        }
+      }
+    },
+    "analyzerMetadata" : {
+      "analyzerVersion" : "1.0",
+      "executionStartTimestamp" : "23/06/2026 18:27:29",
+      "executionEndTimestamp" : "23/06/2026 18:27:29",
+      "executionDuration" : "0.356"
+    },
+    "score" : 5.9
+  },
+  "fileReport" : [ {
+    "fileName" : "N0001_DDL_TBL_BAD.sql",
+    "summaryMetrics" : {
+      "evaluated" : 9,
+      "passed" : 1,
+      "violated" : 8,
+      "coverage" : 11.11,
+      "violationsBySeverity" : {
+        "blocker" : 3,
+        "minor" : 4,
+        "critical" : 1
+      }
+    },
+    "violations" : [ {
+      "ruleId" : "PGD004",
+      "description" : "Validación creación primary key a tabla",
+      "severity" : "CRITICAL",
+      "message" : "La tabla 'bad_table_name' no tiene definida su PRIMARY KEY (se requiere ALTER TABLE).",
+      "solution" : "Define la PRIMARY KEY usando una sentencia ALTER TABLE separada después del CREATE TABLE.",
+      "line" : 2,
+      "column" : 1,
+      "offendingStatement" : "Tabla: bad_table_name"
+    }, {
+      "ruleId" : "PGD001",
+      "description" : "Verifica que cada CREATE TABLE incluya los campos de auditoría obligatorios.",
+      "severity" : "BLOCKER",
+      "message" : "La tabla no incluye campos de auditoría requeridos.",
+      "solution" : "Agrega FD_FECHA_ACTUALIZACION, FC_USUARIO_ACTUALIZA y FD_FECHA_CREACION con las especificaciones correctas.",
+      "line" : 2,
+      "column" : 1,
+      "offendingStatement" : "CREATE TABLE bad_table_name ( id integer, Name varchar(100),..."
+    }, {
+      "ruleId" : "PGD002",
+      "description" : "Las tablas deben tener prefijos correctos y longitud máxima de 15 caracteres",
+      "severity" : "BLOCKER",
+      "message" : "Nombre de tabla no cumple con estándares de prefijo/longitud. (Encontrado: bad_table_name)",
+      "solution" : "Usa prefijos TA, TT, TC o TH y máximo 15 caracteres.",
+      "line" : 2,
+      "column" : 1,
+      "offendingStatement" : "CREATE TABLE bad_table_name ( id integer, Name varchar(100),..."
+    }, {
+      "ruleId" : "PGD003",
+      "description" : "Validación de seteo de tablespace en la tabla",
+      "severity" : "BLOCKER",
+      "message" : "Falta definición de TABLESPACE.",
+      "solution" : "Agrega TABLESPACE al final del CREATE TABLE.",
+      "line" : 2,
+      "column" : 1,
+      "offendingStatement" : "CREATE TABLE bad_table_name ( id integer, Name varchar(100),..."
+    }, {
+      "ruleId" : "PGD020",
+      "description" : "Todas las palabras reservadas (SQL y PL/pgSQL) deben estar en MAYÚSCULAS.",
+      "severity" : "MINOR",
+      "message" : "Palabra reservada en minúscula o MixedCase. (integer)",
+      "solution" : "Escribe todas las palabras reservadas en MAYÚSCULAS (ej: SELECT, BEGIN, VARCHAR).",
+      "line" : 3,
+      "column" : 8,
+      "offendingStatement" : "id integer,"
+    }, {
+      "ruleId" : "PGD020",
+      "description" : "Todas las palabras reservadas (SQL y PL/pgSQL) deben estar en MAYÚSCULAS.",
+      "severity" : "MINOR",
+      "message" : "Palabra reservada en minúscula o MixedCase. (Name)",
+      "solution" : "Escribe todas las palabras reservadas en MAYÚSCULAS (ej: SELECT, BEGIN, VARCHAR).",
+      "line" : 4,
+      "column" : 5,
+      "offendingStatement" : "Name varchar(100),"
+    }, {
+      "ruleId" : "PGD020",
+      "description" : "Todas las palabras reservadas (SQL y PL/pgSQL) deben estar en MAYÚSCULAS.",
+      "severity" : "MINOR",
+      "message" : "Palabra reservada en minúscula o MixedCase. (varchar)",
+      "solution" : "Escribe todas las palabras reservadas en MAYÚSCULAS (ej: SELECT, BEGIN, VARCHAR).",
+      "line" : 4,
+      "column" : 10,
+      "offendingStatement" : "Name varchar(100),"
+    }, {
+      "ruleId" : "PGD020",
+      "description" : "Todas las palabras reservadas (SQL y PL/pgSQL) deben estar en MAYÚSCULAS.",
+      "severity" : "MINOR",
+      "message" : "Palabra reservada en minúscula o MixedCase. (text)",
+      "solution" : "Escribe todas las palabras reservadas en MAYÚSCULAS (ej: SELECT, BEGIN, VARCHAR).",
+      "line" : 5,
+      "column" : 17,
+      "offendingStatement" : "DESCRIPTION text"
+    } ],
+    "passedRules" : [ ],
+    "status" : "FAIL",
+    "score" : 5.9,
+    "errorMessage" : ""
+  } ]
+}

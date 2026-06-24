@@ -432,8 +432,8 @@ func TestEndToEnd_FailurePath(t *testing.T) {
 // localCloner is a fake that returns a pre-existing directory (no git clone).
 type localCloner struct{ root string }
 
-func (c *localCloner) Clone(_ context.Context, _ domain.CloneOptions) (string, error) {
-	return c.root, nil
+func (c *localCloner) Clone(_ context.Context, _ domain.CloneOptions) (string, domain.CommandTrace, error) {
+	return c.root, domain.CommandTrace{Command: "local://fake-clone", Output: ""}, nil
 }
 
 // realPostgresDBProvider wires the real PostgresProvider and Ping.
@@ -462,7 +462,7 @@ func copyDir(src, dst string) error {
 // Used when testing with a real local bare repo.
 type fakeE2ECloner struct{}
 
-func (c *fakeE2ECloner) Clone(ctx context.Context, opts domain.CloneOptions) (string, error) {
+func (c *fakeE2ECloner) Clone(ctx context.Context, opts domain.CloneOptions) (string, domain.CommandTrace, error) {
 	return internalgit.NewCloner(nil, os.MkdirAll).Clone(ctx, opts)
 }
 

@@ -1,0 +1,42 @@
+name: CI
+
+# Runs build + vet + the fast test suite on every pull request into main, so a
+# change that breaks the build, vet, or the unit tests can never be merged.
+# Wire the `test` job as a REQUIRED status check on the main branch.
+#
+# Integration tests (Docker: Postgres + Maven containers) are gated behind
+# `-short` and are NOT run here for speed — they are exercised locally by the
+# maintainer before opening the PR.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: read # `make vendor` fetches the embedded jars from GitHub Packages
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Fetch embedded jars from GitHub Packages
+        run: make vendor
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (fast / no Docker)
+        run: go test ./... -short

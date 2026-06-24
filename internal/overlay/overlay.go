@@ -31,27 +31,30 @@ func New() *Overlay {
 //   - Files are written with 0600 permissions.
 //   - The source directory is never mutated.
 //   - Returns ErrNoPendingSQL (wrapped) when srcDir contains no .sql files.
-func (o *Overlay) Apply(srcDir, destSQLInputDir string) (copied int, err error) {
+//
+// Returns (paths, nil) on success where paths is the list of destination file
+// paths written. len(paths) gives the total copied count.
+func (o *Overlay) Apply(srcDir, destSQLInputDir string) (paths []string, err error) {
 	// First pass: count .sql files in source to allow fail-fast.
 	sqlCount, err := countSQLFiles(srcDir)
 	if err != nil {
-		return 0, fmt.Errorf("overlay: scan source %s: %w", srcDir, err)
+		return nil, fmt.Errorf("overlay: scan source %s: %w", srcDir, err)
 	}
 	if sqlCount == 0 {
-		return 0, fmt.Errorf("overlay: %s: %w", srcDir, domain.ErrNoPendingSQL)
+		return nil, fmt.Errorf("overlay: %s: %w", srcDir, domain.ErrNoPendingSQL)
 	}
 
 	// Clear destination contents (but keep the directory itself).
 	if err := clearDir(destSQLInputDir); err != nil {
-		return 0, fmt.Errorf("overlay: clear dest %s: %w", destSQLInputDir, err)
+		return nil, fmt.Errorf("overlay: clear dest %s: %w", destSQLInputDir, err)
 	}
 
 	// Second pass: copy .sql files preserving subdirectory hierarchy.
-	n, err := copySQLTree(srcDir, destSQLInputDir)
+	ps, err := copySQLTree(srcDir, destSQLInputDir)
 	if err != nil {
-		return n, fmt.Errorf("overlay: copy from %s to %s: %w", srcDir, destSQLInputDir, err)
+		return ps, fmt.Errorf("overlay: copy from %s to %s: %w", srcDir, destSQLInputDir, err)
 	}
-	return n, nil
+	return ps, nil
 }
 
 // countSQLFiles returns the number of regular .sql files in dir (recursive).
@@ -94,9 +97,9 @@ func clearDir(dir string) error {
 }
 
 // copySQLTree recursively copies all regular .sql files from src into dest,
-// mirroring the subdirectory structure. Returns the number of files copied.
-func copySQLTree(src, dest string) (int, error) {
-	copied := 0
+// mirroring the subdirectory structure. Returns the list of dest file paths copied.
+func copySQLTree(src, dest string) ([]string, error) {
+	var paths []string
 	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -127,10 +130,10 @@ func copySQLTree(src, dest string) (int, error) {
 		if err := copyFile(path, destPath); err != nil {
 			return fmt.Errorf("copy %s → %s: %w", path, destPath, err)
 		}
-		copied++
+		paths = append(paths, destPath)
 		return nil
 	})
-	return copied, err
+	return paths, err
 }
 
 // copyFile copies the contents of src to dest with 0600 permissions.

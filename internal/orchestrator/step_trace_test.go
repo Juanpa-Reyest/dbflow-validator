@@ -91,7 +91,14 @@ func makeStepTraceDeps(t *testing.T, schemaSQL string) (orchestrator.Deps, confi
 				},
 			},
 		},
-		Patcher:         &fakePatcher{},
+		Patcher: &fakePatcher{
+			changes: []domain.PropChange{
+				{Key: "url", Before: "jdbc:oracle:old", After: "jdbc:postgresql://postgres:5432/validatordb"},
+				{Key: "username", Before: "old_user", After: "validator"},
+				{Key: "password", Before: "old_pass", After: "v4lid4t0r_pass"},
+				{Key: "driver", Before: "oracle.jdbc.OracleDriver", After: "org.postgresql.Driver"},
+			},
+		},
 		Engine:          &fakeEngineDetector{engine: "postgresql"},
 		Tags:            &fakeTagResolver{tag: "v1.0.0"},
 		Maven: &fakeMavenRunner{
@@ -99,7 +106,7 @@ func makeStepTraceDeps(t *testing.T, schemaSQL string) (orchestrator.Deps, confi
 			rollbackResult: domain.StepResult{Status: domain.StepStatusPassed},
 		},
 		ReadinessPolicy: &fastPolicy,
-		Overlayer:       &fakeOverlayer{copied: 2},
+		Overlayer:       &fakeOverlayer{paths: []string{"/fake/dest/N0001.sql", "/fake/dest/N0002.sql"}},
 	}
 
 	cfg := config.Config{
@@ -404,6 +411,52 @@ func TestStepTrace_PreSyncValidate_ContainsNoOpNote(t *testing.T) {
 	lc := strings.ToLower(s.Trace)
 	if !strings.Contains(lc, "no-op") && !strings.Contains(lc, "not enabled") && !strings.Contains(lc, "disabled") {
 		t.Errorf("pre-sync-validate trace should contain 'no-op', 'not enabled', or 'disabled'; trace:\n%s", s.Trace)
+	}
+}
+
+// TestStepTrace_PreSyncValidate_ActiveValidator_PassNoteContainsPassed asserts
+// that when an active (non-no-op) PreSyncValidator is wired and returns nil, the
+// trace note contains "passed" (generic) and the cloneRoot path, but does NOT
+// mention "no-op" or "not enabled".
+func TestStepTrace_PreSyncValidate_ActiveValidator_PassNoteContainsPassed(t *testing.T) {
+	deps, cfg := makeStepTraceDeps(t, "")
+
+	// Wire a fake PreSyncValidator that always passes (err=nil, empty output).
+	// fakePreSyncValidator is declared in orchestrator_test.go.
+	deps.PreSyncValidator = &fakePreSyncValidator{}
+
+	rpt := orchestrator.Run(context.Background(), deps, cfg)
+	if rpt.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %v", rpt.Status, stepNames(rpt))
+	}
+
+	s := findStep(t, rpt, "pre-sync-validate")
+	lc := strings.ToLower(s.Trace)
+	if strings.Contains(lc, "no-op") || strings.Contains(lc, "not enabled") {
+		t.Errorf("active-validator trace should NOT mention no-op; trace:\n%s", s.Trace)
+	}
+	if !strings.Contains(lc, "passed") {
+		t.Errorf("active-validator trace should contain 'passed'; trace:\n%s", s.Trace)
+	}
+}
+
+// TestStepTrace_PreSyncValidate_ActiveValidator_OutputInTrace asserts that when
+// an active PreSyncValidator returns non-empty output, the output appears in the
+// pre-sync-validate StepResult.Trace on the pass path.
+func TestStepTrace_PreSyncValidate_ActiveValidator_OutputInTrace(t *testing.T) {
+	deps, cfg := makeStepTraceDeps(t, "")
+
+	const jarOutput = "[INFO] Validator started\n[INFO] Rules check passed.\n"
+	deps.PreSyncValidator = &fakePreSyncValidator{output: jarOutput}
+
+	rpt := orchestrator.Run(context.Background(), deps, cfg)
+	if rpt.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %v", rpt.Status, stepNames(rpt))
+	}
+
+	s := findStep(t, rpt, "pre-sync-validate")
+	if !strings.Contains(s.Trace, "[INFO] Validator started") {
+		t.Errorf("pre-sync-validate Trace must contain validator output; trace:\n%s", s.Trace)
 	}
 }
 

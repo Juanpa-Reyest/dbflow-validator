@@ -26,8 +26,12 @@ type CloneOptions struct {
 }
 
 // Cloner clones a remote git repository into a local directory.
+// On success, returns the clone root path, a CommandTrace containing the exact
+// (redacted) command line and combined stdout+stderr output, and nil error.
+// On failure, returns empty cloneRoot, a CommandTrace with partial output
+// captured before the failure, and the error.
 type Cloner interface {
-	Clone(ctx context.Context, opts CloneOptions) (cloneRoot string, err error)
+	Clone(ctx context.Context, opts CloneOptions) (cloneRoot string, trace CommandTrace, err error)
 }
 
 // ContainerCoords holds ephemeral container connection details.
@@ -57,6 +61,10 @@ type ContainerCoords struct {
 	User      string
 	Password  string
 	DBName    string
+	// ContainerID is the short container ID (first 12 chars) returned by the
+	// container runtime after Start. Used to prove which container instance ran.
+	// Empty when the provider does not expose an ID (e.g. test fakes).
+	ContainerID string
 }
 
 // ContainerProvider starts and stops ephemeral database containers.
@@ -75,8 +83,10 @@ type DatabaseProvider interface {
 }
 
 // PropertiesPatcher overwrites liquibase.properties with ephemeral container coords.
+// Returns the list of key-value changes made (before→after per key); password
+// values in Before and After must be redacted by the caller before storing in Trace.
 type PropertiesPatcher interface {
-	Patch(path string, coords ContainerCoords) error
+	Patch(path string, coords ContainerCoords) (changes []PropChange, err error)
 }
 
 // EngineDetector reads liquibase.properties and identifies the target DB engine.
@@ -105,15 +115,22 @@ type MavenRunner interface {
 // The default (no-op) implementation is provided by NoOpPreSyncValidator.
 // Implementors receive the cloneRoot directory and must return a non-nil error to
 // abort the pipeline at the pre-sync-validate step.
+//
+// The returned output string is the combined stdout+stderr captured from the
+// container run. It is appended to the StepResult.Trace so that JAR evidence
+// always appears in execution.log — even on failure paths. An empty string is
+// valid (e.g. the no-op path produces no output).
 type PreSyncValidator interface {
-	ValidatePreSync(ctx context.Context, cloneRoot string) error
+	ValidatePreSync(ctx context.Context, cloneRoot string) (output string, err error)
 }
 
 // NoOpPreSyncValidator is the default PreSyncValidator that always passes.
 // Wire this when no external rules-validator is configured.
 type NoOpPreSyncValidator struct{}
 
-func (NoOpPreSyncValidator) ValidatePreSync(_ context.Context, _ string) error { return nil }
+func (NoOpPreSyncValidator) ValidatePreSync(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
 
 // Overlayer copies the developer's local SQLInput tree into the freshly-cloned
 // repository's SQLInput directory before sync.
@@ -123,7 +140,8 @@ func (NoOpPreSyncValidator) ValidatePreSync(_ context.Context, _ string) error {
 // Only regular .sql files are copied; symlinks and device files are skipped.
 //
 // Returns ErrNoPendingSQL (wrapped) if srcDir contains no .sql files.
-// Returns (copied int, err error) where copied is the number of files written.
+// Returns (paths []string, err error) where paths is the list of dest file
+// paths written (len(paths) replaces the former "copied int" count).
 type Overlayer interface {
-	Apply(srcDir, destSQLInputDir string) (copied int, err error)
+	Apply(srcDir, destSQLInputDir string) (paths []string, err error)
 }

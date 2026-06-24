@@ -37,16 +37,17 @@ var DefaultRetryPolicy = RetryPolicy{
 // It is fully unit-testable via the injected now (clock) and sleep functions.
 //
 // Returns:
-//   - nil when ping succeeds before the deadline.
-//   - domain.ErrReadinessTimeout when the deadline is exhausted.
-//   - ctx.Err() when the context is cancelled or times out.
+//   - (n, nil) when ping succeeds before the deadline; n is the attempt count.
+//   - (n, domain.ErrReadinessTimeout) when the deadline is exhausted; n is the
+//     number of attempts made; the error from the last failed ping is wrapped.
+//   - (n, ctx.Err()) when the context is cancelled or times out.
 func WaitReady(
 	ctx context.Context,
 	ping PingFunc,
 	policy RetryPolicy,
 	now func() time.Time,
 	sleep func(time.Duration),
-) error {
+) (attempts int, lastErr error) {
 	deadline := now().Add(policy.Deadline)
 	interval := policy.InitialInterval
 
@@ -54,24 +55,31 @@ func WaitReady(
 		// Check context cancellation first.
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return attempts, ctx.Err()
 		default:
 		}
 
 		// Check wall-clock deadline.
 		if now().After(deadline) {
-			return fmt.Errorf("%w: exhausted after %s", domain.ErrReadinessTimeout, policy.Deadline)
+			timeoutErr := fmt.Errorf("%w: exhausted after %s", domain.ErrReadinessTimeout, policy.Deadline)
+			if lastErr != nil {
+				timeoutErr = fmt.Errorf("%w: exhausted after %s: last error: %v", domain.ErrReadinessTimeout, policy.Deadline, lastErr)
+			}
+			return attempts, timeoutErr
 		}
 
 		// Attempt ping.
-		if err := ping(ctx); err == nil {
-			return nil
+		attempts++
+		if pingErr := ping(ctx); pingErr == nil {
+			return attempts, nil
+		} else {
+			lastErr = pingErr
 		}
 
 		// Check context again after ping (ping might have taken a while).
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return attempts, ctx.Err()
 		default:
 		}
 

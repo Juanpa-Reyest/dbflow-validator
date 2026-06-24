@@ -323,6 +323,24 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		return appendCleanupAndBuild()
 	}
 
+	// failWithTrace is like fail but also populates StepResult.Trace so that
+	// captured output (e.g. the validator JAR log) is included as evidence.
+	failWithTrace := func(name string, msg string, err error, trace string) domain.RunReport {
+		if err != nil {
+			msg = fmt.Sprintf("%s: %v", msg, err)
+		}
+		log.Error("step failed", "step", name, "error", msg)
+		notify(deps, name, true, true)
+		steps = append(steps, domain.StepResult{
+			Name:   name,
+			Status: domain.StepStatusFailed,
+			Error:  msg,
+			Trace:  strings.TrimRight(trace, "\n"),
+		})
+		overallStatus = domain.StatusFailed
+		return appendCleanupAndBuild()
+	}
+
 	// failUsage signals a configuration/usage error (exit code 2).
 	// Use this for pre-clone guards like missing or empty SQLInput.
 	failUsage := func(name string, msg string, err error) domain.RunReport {
@@ -400,14 +418,25 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	reg.Register(func() error {
 		return os.RemoveAll(destDir)
 	})
-	cloneRoot, err := deps.Cloner.Clone(ctx, domain.CloneOptions{
+	cloneRoot, rawCloneTrace, err := deps.Cloner.Clone(ctx, domain.CloneOptions{
 		RepoURL: cfg.RepoURL,
 		Branch:  cfg.BaseBranch,
 		Token:   cfg.Token,
 		DestDir: destDir,
 	})
 	if err != nil {
-		return fail("clone", "git clone failed", err)
+		// Scrub the token from any captured output before including in the trace.
+		scrubbedCmd := domain.ScrubSecrets(rawCloneTrace.Command, cfg.Token.Reveal())
+		scrubbedOutput := domain.ScrubSecrets(rawCloneTrace.Output, cfg.Token.Reveal())
+		var failTrace strings.Builder
+		failTrace.WriteString(fmt.Sprintf("repo    %s\nbranch  %s", redactURL(cfg.RepoURL), cfg.BaseBranch))
+		if scrubbedCmd != "" {
+			failTrace.WriteString(fmt.Sprintf("\ncommand  %s", scrubbedCmd))
+		}
+		if scrubbedOutput != "" {
+			failTrace.WriteString(fmt.Sprintf("\n\n%s", scrubbedOutput))
+		}
+		return failWithTrace("clone", "git clone failed", err, failTrace.String())
 	}
 	log.Debug("clone destination", "clone_root", cloneRoot)
 	// Record the clone root in cs so runCleanupStep can describe the workspace
@@ -440,13 +469,29 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		return MoveWorkspace(capturedCS.cloneRoot, filepath.Join(capturedCS.runDir, "workspace"))
 	})
 	{
-		cloneTrace := fmt.Sprintf(
-			"repo    %s\nbranch  %s\ndest    %s\nstructure: liquibase.properties, master-changelog/ expected",
-			redactURL(cfg.RepoURL),
-			cfg.BaseBranch,
-			cloneRoot,
-		)
-		passWithTrace("clone", time.Since(t0), cloneTrace)
+		// Scrub the token from command and output before writing into the trace.
+		scrubbedCmd := domain.ScrubSecrets(rawCloneTrace.Command, cfg.Token.Reveal())
+		scrubbedOutput := domain.ScrubSecrets(rawCloneTrace.Output, cfg.Token.Reveal())
+
+		// Extract the real HEAD sha from git's output when available.
+		// git shallow clone prints "HEAD is now at <sha>" on success.
+		headLine := extractHeadLine(scrubbedOutput)
+
+		// Always include repo, branch, and dest so the trace is human-readable
+		// even when the adapter returns an empty CommandTrace (e.g. test fakes).
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("repo    %s\nbranch  %s\ndest    %s",
+			redactURL(cfg.RepoURL), cfg.BaseBranch, cloneRoot))
+		if scrubbedCmd != "" {
+			sb.WriteString(fmt.Sprintf("\ncommand  %s", scrubbedCmd))
+		}
+		if scrubbedOutput != "" {
+			sb.WriteString(fmt.Sprintf("\n\n%s", scrubbedOutput))
+		}
+		if headLine != "" {
+			sb.WriteString(fmt.Sprintf("\nhead    %s", headLine))
+		}
+		passWithTrace("clone", time.Since(t0), sb.String())
 	}
 
 	// Write settings.xml into the clone dir so the Maven container can pick it up
@@ -486,17 +531,24 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		log.Debug("overlay file list", "files", strings.Join(overlayFiles, ", "), "count", len(overlayFiles))
 		t0 = time.Now()
 		destSQLInput := cloneRoot + "/src/main/resources/SQLInput"
-		copiedCount, err := deps.Overlayer.Apply(cfg.SQLInputPath, destSQLInput)
+		copiedPaths, err := deps.Overlayer.Apply(cfg.SQLInputPath, destSQLInput)
 		if err != nil {
 			return fail("overlay", "SQLInput overlay failed", err)
 		}
 		{
 			var overlayLines []string
 			overlayLines = append(overlayLines,
-				fmt.Sprintf("files copied: %d  (src: %s → dest: %s)",
-					copiedCount, cfg.SQLInputPath, destSQLInput))
-			for _, f := range overlayFiles {
-				overlayLines = append(overlayLines, "  "+f)
+				fmt.Sprintf("copied: %d files  (src: %s → dest: %s)",
+					len(copiedPaths), cfg.SQLInputPath, destSQLInput))
+			for _, p := range copiedPaths {
+				overlayLines = append(overlayLines, "  "+p)
+			}
+			// Also list the src file names for human-readable context.
+			if len(overlayFiles) > 0 {
+				overlayLines = append(overlayLines, "src files:")
+				for _, f := range overlayFiles {
+					overlayLines = append(overlayLines, "  "+f)
+				}
 			}
 			passWithTrace("overlay", time.Since(t0), strings.Join(overlayLines, "\n"))
 		}
@@ -565,6 +617,9 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 			pgAlias, coords.AliasPort,
 			coords.DBName, coords.User,
 		)
+		if coords.ContainerID != "" {
+			containerTrace += fmt.Sprintf("\ncontainer_id  %s", coords.ContainerID)
+		}
 		if activeNetworkName != "" {
 			containerTrace += fmt.Sprintf("\nnetwork %s", activeNetworkName)
 		}
@@ -583,20 +638,27 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	if deps.ReadinessPolicy != nil {
 		policy = *deps.ReadinessPolicy
 	}
-	readinessErr := container.WaitReady(
+	readinessAttempts, readinessErr := container.WaitReady(
 		ctx,
 		pingFn,
 		policy,
 		time.Now,
 		func(d time.Duration) { time.Sleep(d) },
 	)
+	readinessElapsed := time.Since(t0)
 	if readinessErr != nil {
-		return fail("readiness-probe", "database readiness probe timed out", readinessErr)
+		readinessTrace := fmt.Sprintf(
+			"probe    SELECT 1\nattempts %d\nelapsed  %s\nerror    %v",
+			readinessAttempts,
+			readinessElapsed.Round(time.Millisecond),
+			readinessErr,
+		)
+		return failWithTrace("readiness-probe", "database readiness probe timed out", readinessErr, readinessTrace)
 	}
 	{
-		readinessElapsed := time.Since(t0)
 		readinessTrace := fmt.Sprintf(
-			"database accepting connections\nprobe elapsed: %s  (deadline: %s, initial interval: %s)",
+			"probe    SELECT 1\nresult   database accepting connections\nattempts %d\nelapsed  %s  (deadline: %s, initial interval: %s)",
+			readinessAttempts,
 			readinessElapsed.Round(time.Millisecond),
 			policy.Deadline,
 			policy.InitialInterval,
@@ -620,20 +682,32 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	lbUsername := coords.User // default: throwaway admin user
 	lbPassword := coords.Password
 
+	// schemaTraces collects CommandTrace values from each provisioning sub-step
+	// so the orchestrator can render them into a single schema-setup Trace block.
+	var schemaTraces []domain.CommandTrace
+
 	if schemaName != "" {
 		lbUsername = liquibase.LbUsername(schemaName)
 		lbPassword = "lb_v4lid4t0r_pass" // throwaway password for lb user
 
 		// Create the lb_<schema> login role.
-		if err := container.CreateLbUser(ctx, adminDSN, lbUsername, lbPassword); err != nil {
-			return fail("schema-setup", "failed to create lb_<schema> user", err)
+		lbUserTrace, lbUserErr := container.CreateLbUser(ctx, adminDSN, lbUsername, lbPassword)
+		// Scrub the password from the trace before storing (defense-in-depth).
+		lbUserTrace.Command = domain.ScrubSecrets(lbUserTrace.Command, lbPassword)
+		lbUserTrace.Output = domain.ScrubSecrets(lbUserTrace.Output, lbPassword)
+		schemaTraces = append(schemaTraces, lbUserTrace)
+		if lbUserErr != nil {
+			return failWithTrace("schema-setup", "failed to create lb_<schema> user", lbUserErr,
+				buildSchemaSetupTrace(schemaName, lbUsername, schemaTraces, nil))
 		}
 
 		// Auto-create any GRANT-target roles found in the archetype DDL.
 		grantRoles, _ := liquibase.ExtractGrantTargetRolesFromArchetype(cloneRoot)
 		if len(grantRoles) > 0 {
-			if err := container.CreateRolesIfNotExist(ctx, adminDSN, grantRoles); err != nil {
-				return fail("schema-setup", "failed to create GRANT-target roles", err)
+			roleTraces, rolesErr := container.CreateRolesIfNotExist(ctx, adminDSN, grantRoles)
+			schemaTraces = append(schemaTraces, roleTraces...)
+			if rolesErr != nil {
+				return fail("schema-setup", "failed to create GRANT-target roles", rolesErr)
 			}
 		}
 
@@ -641,9 +715,11 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		// CONNECT is required to establish sessions; CREATE is required so the lb
 		// user can create the application schema (scgolfcore, etc.) inside the DB.
 		// Mirrors ambientacion.sql: GRANT CONNECT, CREATE ON DATABASE dbtest TO scliquibase.
-		if err := container.GrantConnectCreateOnDatabase(ctx, adminDSN, coords.DBName, lbUsername); err != nil {
+		grantTrace, grantErr := container.GrantConnectCreateOnDatabase(ctx, adminDSN, coords.DBName, lbUsername)
+		schemaTraces = append(schemaTraces, grantTrace)
+		if grantErr != nil {
 			slog.Warn("could not grant CONNECT, CREATE on database to lb user; sync may fail",
-				"user", lbUsername, "db", coords.DBName, "err", err)
+				"user", lbUsername, "db", coords.DBName, "err", grantErr)
 		}
 
 		// Create the lb_<schema> bookkeeping schema owned by the lb user.
@@ -651,31 +727,18 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		// the schema matching the connection username. Without this schema, Liquibase
 		// falls back to public and may fail with permission errors.
 		// Mirrors ambientacion.sql: CREATE SCHEMA scliquibase; ALTER SCHEMA scliquibase OWNER TO scliquibase.
-		if err := container.CreateLbBookkeepingSchema(ctx, adminDSN, lbUsername); err != nil {
+		schemaTrace, schemaErr := container.CreateLbBookkeepingSchema(ctx, adminDSN, lbUsername)
+		schemaTraces = append(schemaTraces, schemaTrace)
+		if schemaErr != nil {
 			slog.Warn("could not create lb bookkeeping schema; sync may fail with schema errors",
-				"schema", lbUsername, "err", err)
+				"schema", lbUsername, "err", schemaErr)
 		}
 	}
 	{
 		schemaSetupDur := time.Since(t0)
-		var schemaLines []string
-		if schemaName != "" {
-			grantRoles, _ := liquibase.ExtractGrantTargetRolesFromArchetype(cloneRoot)
-			schemaLines = append(schemaLines,
-				fmt.Sprintf("schema          %s", schemaName),
-				fmt.Sprintf("lb user         %s  (password: [REDACTED])", lbUsername),
-				fmt.Sprintf("bookkeeping schema: %s", lbUsername),
-			)
-			if len(grantRoles) > 0 {
-				schemaLines = append(schemaLines,
-					fmt.Sprintf("grant-target roles created: %s", strings.Join(grantRoles, ", ")))
-			}
-		} else {
-			schemaLines = append(schemaLines,
-				fmt.Sprintf("no schema found in archetype DDL; using admin user: %s", lbUsername),
-			)
-		}
-		passWithTrace("schema-setup", schemaSetupDur, strings.Join(schemaLines, "\n"))
+		grantRoles, _ := liquibase.ExtractGrantTargetRolesFromArchetype(cloneRoot)
+		passWithTrace("schema-setup", schemaSetupDur,
+			buildSchemaSetupTrace(schemaName, lbUsername, schemaTraces, grantRoles))
 	}
 
 	// Build lb_coords with the lb_<schema> user for liquibase.properties patching.
@@ -703,12 +766,20 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	notify(deps, "pom-driver-inject", false, false)
 	t0 = time.Now()
 	clonedPomPath := cloneRoot + "/pom.xml"
-	if err := maven.InjectDriverDependency(clonedPomPath); err != nil {
-		return fail("pom-driver-inject", "failed to inject PostgreSQL driver into cloned pom.xml", err)
+	injectedBlock, pomNoOp, pomErr := maven.InjectDriverDependency(clonedPomPath)
+	if pomErr != nil {
+		return fail("pom-driver-inject", "failed to inject PostgreSQL driver into cloned pom.xml", pomErr)
 	}
-	passWithTrace("pom-driver-inject", time.Since(t0),
-		fmt.Sprintf("injected driver: %s:%s:%s into %s",
-			"org.postgresql", "postgresql", maven.PostgresDriverVersion, clonedPomPath))
+	{
+		var pomTrace string
+		if pomNoOp {
+			pomTrace = fmt.Sprintf("driver already present or plugin not found — pom unchanged\npom     %s", clonedPomPath)
+		} else {
+			pomTrace = fmt.Sprintf("injected driver: %s:%s:%s\npom     %s\n\n%s",
+				"org.postgresql", "postgresql", maven.PostgresDriverVersion, clonedPomPath, injectedBlock)
+		}
+		passWithTrace("pom-driver-inject", time.Since(t0), pomTrace)
+	}
 
 	// --- Step 6c: Patch liquibase.properties ---
 	log.Info("step.start", "step", "properties-patch",
@@ -720,20 +791,39 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	)
 	notify(deps, "properties-patch", false, false)
 	t0 = time.Now()
-	if err := deps.Patcher.Patch(propsPath, lbCoords); err != nil {
-		return fail("properties-patch", "failed to patch liquibase.properties", err)
+	propChanges, patchErr := deps.Patcher.Patch(propsPath, lbCoords)
+	if patchErr != nil {
+		return fail("properties-patch", "failed to patch liquibase.properties", patchErr)
 	}
 	{
-		jdbcHost := lbCoords.Host
-		jdbcPort := lbCoords.Port
-		if lbCoords.AliasHost != "" {
-			jdbcHost = lbCoords.AliasHost
-			jdbcPort = lbCoords.AliasPort
+		var patchLines []string
+		patchLines = append(patchLines, fmt.Sprintf("file     %s", propsPath))
+		for _, ch := range propChanges {
+			before := ch.Before
+			after := ch.After
+			// Scrub password values — never reveal them in the trace.
+			// For the "password" key: always replace with [REDACTED].
+			// For other keys: apply ScrubSecrets only if lbPassword or coords.Password
+			// appear literally (defense-in-depth), but only when those secrets are
+			// long enough to avoid false positives (len >= 8).
+			if ch.Key == "password" {
+				before = "[REDACTED]"
+				after = "[REDACTED]"
+			} else {
+				// Only scrub if secrets are meaningful (len >= 8) to avoid
+				// false-positive matches on short strings like "p" in "postgresql".
+				var safeSecrets []string
+				for _, s := range []string{lbPassword, coords.Password} {
+					if len(s) >= 8 {
+						safeSecrets = append(safeSecrets, s)
+					}
+				}
+				before = domain.ScrubSecrets(before, safeSecrets...)
+				after = domain.ScrubSecrets(after, safeSecrets...)
+			}
+			patchLines = append(patchLines, fmt.Sprintf("  %-10s  before: %s  after: %s", ch.Key, before, after))
 		}
-		jdbcURL := fmt.Sprintf("jdbc:postgresql://%s:%d/%s", jdbcHost, jdbcPort, lbCoords.DBName)
-		passWithTrace("properties-patch", time.Since(t0),
-			fmt.Sprintf("url      %s\nusername %s\npassword [REDACTED]",
-				jdbcURL, lbCoords.User))
+		passWithTrace("properties-patch", time.Since(t0), strings.Join(patchLines, "\n"))
 	}
 
 	// --- Step 6d: Pre-sync validation (optional seam) ---
@@ -748,15 +838,21 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		preSyncValidator = domain.NoOpPreSyncValidator{}
 	}
 	isNoOp := deps.PreSyncValidator == nil
-	if err := preSyncValidator.ValidatePreSync(ctx, cloneRoot); err != nil {
-		return fail("pre-sync-validate", "pre-sync validation failed", err)
+	valOutput, valErr := preSyncValidator.ValidatePreSync(ctx, cloneRoot)
+	if valErr != nil {
+		// Include valOutput in the Trace so JAR evidence is visible on failure.
+		return failWithTrace("pre-sync-validate", "pre-sync validation failed", valErr, valOutput)
 	}
 	{
 		var preSyncNote string
 		if isNoOp {
-			preSyncNote = "SQL rules validator not enabled (no-op seam); step is a pass-through"
+			preSyncNote = "no-op seam active; no output"
 		} else {
 			preSyncNote = fmt.Sprintf("SQL rules validator ran against %s — passed", cloneRoot)
+		}
+		// Append captured JAR output when present so execution.log carries full evidence.
+		if valOutput != "" {
+			preSyncNote = preSyncNote + "\n\n" + valOutput
 		}
 		passWithTrace("pre-sync-validate", time.Since(t0), preSyncNote)
 	}
@@ -905,6 +1001,69 @@ func buildRedactedMvnCmd(goal string, params []string) string {
 	}
 	parts = append(parts, "-Dparams="+strings.Join(params, " "))
 	return strings.Join(parts, " ")
+}
+
+// extractHeadLine scans git's combined output for the line that identifies the
+// checked-out HEAD commit. git shallow clone prints:
+//
+//	"HEAD is now at <sha> <message>"
+//
+// or, in some versions:
+//
+//	"Note: switching to '<sha>'."
+//
+// Returns the matching line (trimmed) or empty string if none found.
+func extractHeadLine(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "HEAD is now at ") {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// buildSchemaSetupTrace renders the schema-setup step trace from the collected
+// provisioning sub-step CommandTrace values. Each trace entry shows the SQL
+// executed and the driver result (command tag or error message).
+func buildSchemaSetupTrace(schemaName, lbUsername string, traces []domain.CommandTrace, grantRoles []string) string {
+	var lines []string
+	if schemaName == "" {
+		lines = append(lines, fmt.Sprintf("no schema found in archetype DDL; using admin user: %s", lbUsername))
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines,
+		fmt.Sprintf("schema          %s", schemaName),
+		fmt.Sprintf("lb user         %s  (password: [REDACTED])", lbUsername),
+		fmt.Sprintf("bookkeeping schema: %s", lbUsername),
+	)
+	if len(grantRoles) > 0 {
+		lines = append(lines, fmt.Sprintf("grant-target roles created: %s", strings.Join(grantRoles, ", ")))
+	}
+	if len(traces) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, "driver results:")
+		for _, tr := range traces {
+			if tr.Command != "" {
+				// Truncate long SQL for readability; first line is sufficient.
+				cmdLine := firstLine(tr.Command)
+				lines = append(lines, fmt.Sprintf("  sql     %s", cmdLine))
+				lines = append(lines, fmt.Sprintf("  result  %s", tr.Output))
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// firstLine returns the first non-empty line of s (trimmed), or s itself if single-line.
+func firstLine(s string) string {
+	for _, l := range strings.Split(s, "\n") {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			return l
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 func tempCloneDir() string {

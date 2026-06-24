@@ -3,8 +3,10 @@ package liquibase_test
 import (
 	"bytes"
 	"os"
+	"strings"
 	"testing"
 
+	"github.com/dbflow-validator/dbflow-validator/internal/domain"
 	"github.com/dbflow-validator/dbflow-validator/internal/liquibase"
 )
 
@@ -100,8 +102,13 @@ func TestPatch(t *testing.T) {
 			DBName:   "validation_db",
 		}
 		patcher := liquibase.NewPatcher()
-		if err := patcher.Patch(propsPath, coords); err != nil {
+		changes, err := patcher.Patch(propsPath, coords)
+		if err != nil {
 			t.Fatalf("Patch: %v", err)
+		}
+		// AC-14: should return 4 PropChange entries (url, username, password, driver).
+		if len(changes) != 4 {
+			t.Errorf("expected 4 PropChange entries, got %d: %v", len(changes), changes)
 		}
 
 		data, err := os.ReadFile(propsPath)
@@ -140,7 +147,7 @@ func TestPatch(t *testing.T) {
 
 	t.Run("file absent returns error", func(t *testing.T) {
 		patcher := liquibase.NewPatcher()
-		err := patcher.Patch("/nonexistent/path/liquibase.properties", liquibase.PatchCoords{})
+		_, err := patcher.Patch("/nonexistent/path/liquibase.properties", liquibase.PatchCoords{})
 		if err == nil {
 			t.Fatal("Patch() expected error for missing file, got nil")
 		}
@@ -167,7 +174,7 @@ func TestPatch(t *testing.T) {
 			DBName:    "validatordb",
 		}
 		patcher := liquibase.NewPatcher()
-		if err := patcher.Patch(propsPath, coords); err != nil {
+		if _, err := patcher.Patch(propsPath, coords); err != nil {
 			t.Fatalf("Patch: %v", err)
 		}
 
@@ -207,7 +214,7 @@ func TestPatch(t *testing.T) {
 			// AliasHost intentionally empty — should fall back to Host:Port.
 		}
 		patcher := liquibase.NewPatcher()
-		if err := patcher.Patch(propsPath, coords); err != nil {
+		if _, err := patcher.Patch(propsPath, coords); err != nil {
 			t.Fatalf("Patch: %v", err)
 		}
 
@@ -220,4 +227,97 @@ func TestPatch(t *testing.T) {
 			t.Errorf("fallback url = %q, want %q", gotURL, wantURL)
 		}
 	})
+}
+
+// ---- PropChange return tests (Slice 6c — AC-14, AC-15) ----
+
+// TestPatch_PropChanges_ContainsAllKeys verifies that Patch returns one PropChange
+// per key set (url, username, password, driver) with non-empty After values (AC-14).
+func TestPatch_PropChanges_ContainsAllKeys(t *testing.T) {
+	dir := t.TempDir()
+	propsPath := dir + "/liquibase.properties"
+
+	initialContent := "url=jdbc:oracle:thin:@old:1521:XE\ndriver=oracle.jdbc.OracleDriver\nusername=old_user\npassword=old_pass\n"
+	if err := os.WriteFile(propsPath, []byte(initialContent), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	coords := domain.ContainerCoords{
+		Host:     "127.0.0.1",
+		Port:     5432,
+		User:     "lb_testschema",
+		Password: "secret_password",
+		DBName:   "testdb",
+	}
+	patcher := liquibase.NewPatcher()
+	changes, err := patcher.Patch(propsPath, coords)
+	if err != nil {
+		t.Fatalf("Patch: %v", err)
+	}
+
+	// AC-14: must return 4 changes.
+	if len(changes) != 4 {
+		t.Fatalf("expected 4 PropChange entries, got %d: %v", len(changes), changes)
+	}
+
+	// Index by key for easier assertion.
+	byKey := make(map[string]domain.PropChange)
+	for _, ch := range changes {
+		byKey[ch.Key] = ch
+	}
+
+	for _, key := range []string{"url", "username", "password", "driver"} {
+		ch, ok := byKey[key]
+		if !ok {
+			t.Errorf("missing PropChange for key %q", key)
+			continue
+		}
+		if ch.After == "" {
+			t.Errorf("PropChange[%q].After must not be empty", key)
+		}
+	}
+
+	// Before values should reflect the original props file.
+	if urlCh := byKey["url"]; !strings.Contains(urlCh.Before, "oracle") {
+		t.Errorf("url Before should contain original oracle URL; got: %q", urlCh.Before)
+	}
+	if uCh := byKey["username"]; uCh.Before != "old_user" {
+		t.Errorf("username Before should be 'old_user'; got: %q", uCh.Before)
+	}
+}
+
+// TestPatch_PropChanges_PasswordInRawChanges verifies that the raw PropChange
+// from Patch contains the real password (so the caller knows what to scrub).
+// AC-15: the CALLER (orchestrator) must scrub it — not the adapter.
+func TestPatch_PropChanges_PasswordInRawChanges(t *testing.T) {
+	dir := t.TempDir()
+	propsPath := dir + "/liquibase.properties"
+	if err := os.WriteFile(propsPath, []byte("url=x\nusername=u\npassword=old\ndriver=d\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	const realPass = "super_secret_lb_pass"
+	coords := domain.ContainerCoords{
+		Host:     "127.0.0.1",
+		Port:     5432,
+		User:     "lb_test",
+		Password: realPass,
+		DBName:   "db",
+	}
+	patcher := liquibase.NewPatcher()
+	changes, err := patcher.Patch(propsPath, coords)
+	if err != nil {
+		t.Fatalf("Patch: %v", err)
+	}
+
+	// The adapter must return the raw password in PropChange.After so the orchestrator can scrub.
+	byKey := make(map[string]domain.PropChange)
+	for _, ch := range changes {
+		byKey[ch.Key] = ch
+	}
+	pwCh := byKey["password"]
+	if pwCh.After != realPass {
+		t.Errorf("expected PropChange[password].After = %q (raw); got: %q", realPass, pwCh.After)
+	}
+	// This test verifies the ADAPTER returns raw; the ORCHESTRATOR test verifies scrubbing.
 }

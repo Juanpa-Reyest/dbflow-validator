@@ -30,11 +30,18 @@ PLUGIN_DIR   := internal/embedrepo/mvn-vendor/repository/com/gs/ftt/coe-ds/relat
 PLUGIN_JAR   := $(PLUGIN_DIR)/relational-db-release-manager-plugin-$(PLUGIN_VERSION).jar
 PACKAGES_URL := https://maven.pkg.github.com/Juanpa-Reyest/dbflow-validator/com/gs/ftt/coe-ds/relational-db-release-manager-plugin/$(PLUGIN_VERSION)/relational-db-release-manager-plugin-$(PLUGIN_VERSION).jar
 
+# VALIDATOR_VERSION is the single source of truth for the embedded SQL-rules
+# validator jar. Bump it here (or override: VALIDATOR_VERSION=0.0.2 make build).
+# The jar is fetched into the version-less path that embed.go //go:embed expects.
+VALIDATOR_VERSION ?= 0.0.1
+VALIDATOR_JAR     := internal/embedvalidator/jar/library-script-validator-postgresql.jar
+VALIDATOR_URL     := https://maven.pkg.github.com/Juanpa-Reyest/dbflow-validator/com/gs/ftt/coe-ds/library-script-validator-postgresql-java/$(VALIDATOR_VERSION)/library-script-validator-postgresql-java-$(VALIDATOR_VERSION).jar
+
 .PHONY: build build-all clean vendor
 
-## vendor — Fetch the plugin jar from GitHub Packages if not already present.
-## Requires GH_TOKEN (read:packages) when the jar is missing.
-## This is a no-op when the jar already exists locally.
+## vendor — Fetch the embedded jars (Maven plugin + SQL-rules validator) from
+## GitHub Packages if not already present. Both are required by //go:embed at build
+## time. Requires GH_TOKEN (read:packages) when a jar is missing; no-op when present.
 vendor:
 	@if [ -f "$(PLUGIN_JAR)" ]; then \
 		echo "vendor: plugin jar already present — skipping download"; \
@@ -46,6 +53,17 @@ vendor:
 			-o "$(PLUGIN_JAR)" \
 			"$(PACKAGES_URL)"; \
 		echo "vendor: downloaded $(PLUGIN_JAR)"; \
+	fi
+	@if [ -f "$(VALIDATOR_JAR)" ]; then \
+		echo "vendor: validator jar already present — skipping download"; \
+	else \
+		echo "vendor: downloading validator jar from GitHub Packages..."; \
+		mkdir -p "$(dir $(VALIDATOR_JAR))"; \
+		curl -fsSL \
+			-H "Authorization: Bearer $$GH_TOKEN" \
+			-o "$(VALIDATOR_JAR)" \
+			"$(VALIDATOR_URL)"; \
+		echo "vendor: downloaded $(VALIDATOR_JAR)"; \
 	fi
 
 ## build — Build for the current host platform.

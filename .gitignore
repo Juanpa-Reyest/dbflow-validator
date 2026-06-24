@@ -12,9 +12,15 @@ dbflow-validator-runs/
 # Glob matches any version so a version bump never needs to touch this file.
 internal/embedrepo/mvn-vendor/repository/com/gs/ftt/coe-ds/relational-db-release-manager-plugin/*/relational-db-release-manager-plugin-*.jar
 
+# Validator JAR (~10MB) — copied locally at build time, not committed.
+# Glob matches any version so a version bump never needs to touch this file.
+internal/embedvalidator/jar/*.jar
+
 # Local-only tooling and process artifacts — not part of the app's functionality.
 # These are AI/SDD assistants and maintainer process docs, kept on disk but not versioned.
 .engram/
 .atl/
 openspec/
 docs/
+scripts/publish-plugin.sh
+scripts/publish-validator.sh
