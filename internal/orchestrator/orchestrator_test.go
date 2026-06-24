@@ -874,6 +874,28 @@ func TestOrchestrator_ReadinessProbeTrace_ContainsErrorOnTimeout(t *testing.T) {
 	}
 }
 
+// ---- Pre-sync-validate no-op label test (Slice 5 — AC-20) ----
+
+// TestOrchestrator_PreSyncValidate_NoOp_ExplicitLabel verifies that when
+// PreSyncValidator is nil (no-op path), the pre-sync-validate Trace contains
+// the explicit "no-op seam active" label (AC-20).
+func TestOrchestrator_PreSyncValidate_NoOp_ExplicitLabel(t *testing.T) {
+	deps := happyDeps(t)
+	deps.PreSyncValidator = nil // no-op path
+
+	report := orchestrator.Run(context.Background(), deps, testCfg())
+
+	if report.Status != domain.StatusPassed {
+		t.Fatalf("expected PASSED, got %v; steps: %+v", report.Status, report.Steps)
+	}
+
+	preSyncStep := findStep(t, report, "pre-sync-validate")
+	// AC-20: no-op trace must contain the explicit label.
+	if !strings.Contains(preSyncStep.Trace, "no-op seam active") {
+		t.Errorf("pre-sync-validate no-op Trace must contain 'no-op seam active'; trace: %q", preSyncStep.Trace)
+	}
+}
+
 // TestOrchestrator_ContainerStart_TraceContainsContainerID verifies that when
 // ContainerCoords.ContainerID is set, the container-start step Trace includes it
 // (AC-8).
