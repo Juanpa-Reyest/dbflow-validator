@@ -323,6 +323,24 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		return appendCleanupAndBuild()
 	}
 
+	// failWithTrace is like fail but also populates StepResult.Trace so that
+	// captured output (e.g. the validator JAR log) is included as evidence.
+	failWithTrace := func(name string, msg string, err error, trace string) domain.RunReport {
+		if err != nil {
+			msg = fmt.Sprintf("%s: %v", msg, err)
+		}
+		log.Error("step failed", "step", name, "error", msg)
+		notify(deps, name, true, true)
+		steps = append(steps, domain.StepResult{
+			Name:   name,
+			Status: domain.StepStatusFailed,
+			Error:  msg,
+			Trace:  strings.TrimRight(trace, "\n"),
+		})
+		overallStatus = domain.StatusFailed
+		return appendCleanupAndBuild()
+	}
+
 	// failUsage signals a configuration/usage error (exit code 2).
 	// Use this for pre-clone guards like missing or empty SQLInput.
 	failUsage := func(name string, msg string, err error) domain.RunReport {
@@ -748,15 +766,21 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 		preSyncValidator = domain.NoOpPreSyncValidator{}
 	}
 	isNoOp := deps.PreSyncValidator == nil
-	if err := preSyncValidator.ValidatePreSync(ctx, cloneRoot); err != nil {
-		return fail("pre-sync-validate", "pre-sync validation failed", err)
+	valOutput, valErr := preSyncValidator.ValidatePreSync(ctx, cloneRoot)
+	if valErr != nil {
+		// Include valOutput in the Trace so JAR evidence is visible on failure.
+		return failWithTrace("pre-sync-validate", "pre-sync validation failed", valErr, valOutput)
 	}
 	{
 		var preSyncNote string
 		if isNoOp {
 			preSyncNote = "SQL rules validator not enabled (no-op seam); step is a pass-through"
 		} else {
-			preSyncNote = fmt.Sprintf("SQL rules validator ran against %s — status PASS", cloneRoot)
+			preSyncNote = fmt.Sprintf("SQL rules validator ran against %s — passed", cloneRoot)
+		}
+		// Append captured JAR output when present so execution.log carries full evidence.
+		if valOutput != "" {
+			preSyncNote = preSyncNote + "\n\n" + valOutput
 		}
 		passWithTrace("pre-sync-validate", time.Since(t0), preSyncNote)
 	}
