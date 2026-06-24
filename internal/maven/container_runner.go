@@ -10,6 +10,7 @@ import (
 	"time"
 
 	dockercontainer "github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -107,11 +108,27 @@ func BuildContainerRequest(
 			"HOME": "/tmp",
 		},
 		HostConfigModifier: func(hc *dockercontainer.HostConfig) {
-			binds := []string{cloneRoot + ":/work:rw"}
-			if repoCachePath != "" {
-				binds = append(binds, repoCachePath+":/m2:ro")
+			// Use typed mounts instead of raw "host:container:mode" bind strings.
+			// Typed mounts (hc.Mounts) keep Source and Target as separate struct
+			// fields, so a Windows path like "E:\..." is never split on its
+			// drive-letter colon during Docker's bind-string parse.
+			mounts := []mount.Mount{
+				{
+					Type:     mount.TypeBind,
+					Source:   cloneRoot,
+					Target:   "/work",
+					ReadOnly: false,
+				},
 			}
-			hc.Binds = binds
+			if repoCachePath != "" {
+				mounts = append(mounts, mount.Mount{
+					Type:     mount.TypeBind,
+					Source:   repoCachePath,
+					Target:   "/m2",
+					ReadOnly: true,
+				})
+			}
+			hc.Mounts = mounts
 		},
 		// Wait until the Maven container exits before returning from GenericContainer.
 		// Timeout is intentionally absent — context cancellation handles deadline.

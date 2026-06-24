@@ -8,11 +8,11 @@ import (
 )
 
 const (
-	testImage      = "maven:3.9-eclipse-temurin-21"
-	testCloneRoot  = "/work-host/clone"
-	testJARPath    = "/cache/validator.jar"
-	testUID        = 1000
-	testGID        = 1000
+	testImage     = "maven:3.9-eclipse-temurin-21"
+	testCloneRoot = "/work-host/clone"
+	testJARPath   = "/cache/validator.jar"
+	testUID       = 1000
+	testGID       = 1000
 )
 
 func buildTestRequest(t *testing.T) rulesvalidator.ValidatorContainerRequest {
@@ -82,31 +82,66 @@ func TestBuildContainerRequest_CmdContainsSQLInputFlag(t *testing.T) {
 	}
 }
 
-func TestBuildContainerRequest_BindsContainCloneRootMount(t *testing.T) {
+// TestBuildContainerRequest_MountsCloneRootRW asserts that the clone root is
+// carried as a typed mount with Source=cloneRoot, Target=/work, ReadOnly=false.
+// Typed mounts (hc.Mounts) avoid Windows drive-letter colon ambiguity that
+// breaks raw bind-string parsing ("E:\...:container:mode").
+func TestBuildContainerRequest_MountsCloneRootRW(t *testing.T) {
 	req := buildTestRequest(t)
-	found := false
-	for _, b := range req.Binds {
-		if strings.HasPrefix(b, testCloneRoot+":") && strings.Contains(b, "/work") {
-			found = true
-			break
+	for _, m := range req.Mounts {
+		if m.Source == testCloneRoot && m.Target == "/work" {
+			if m.ReadOnly {
+				t.Errorf("clone root mount must be read-write (ReadOnly=false), got ReadOnly=true")
+			}
+			return
 		}
 	}
-	if !found {
-		t.Errorf("Binds must include cloneRoot:/work mount; binds=%v", req.Binds)
-	}
+	t.Errorf("Mounts must contain {Source:%q, Target:\"/work\", ReadOnly:false}; mounts=%+v", testCloneRoot, req.Mounts)
 }
 
-func TestBuildContainerRequest_BindsContainJARMount(t *testing.T) {
+// TestBuildContainerRequest_MountsJARReadOnly asserts that the JAR host path is
+// mounted at /val/validator.jar read-only as a typed mount.
+func TestBuildContainerRequest_MountsJARReadOnly(t *testing.T) {
 	req := buildTestRequest(t)
-	found := false
-	for _, b := range req.Binds {
-		if strings.HasPrefix(b, testJARPath+":") && strings.Contains(b, "/val/validator.jar") && strings.HasSuffix(b, ":ro") {
-			found = true
-			break
+	for _, m := range req.Mounts {
+		if m.Source == testJARPath && m.Target == "/val/validator.jar" {
+			if !m.ReadOnly {
+				t.Errorf("JAR mount must be read-only (ReadOnly=true), got ReadOnly=false")
+			}
+			return
 		}
 	}
-	if !found {
-		t.Errorf("Binds must include jarPath:/val/validator.jar:ro; binds=%v", req.Binds)
+	t.Errorf("Mounts must contain {Source:%q, Target:\"/val/validator.jar\", ReadOnly:true}; mounts=%+v", testJARPath, req.Mounts)
+}
+
+// TestBuildContainerRequest_WindowsPathPassedThrough is the regression guard for
+// the Windows bind-mount bug. A Windows-style source path (with a drive-letter
+// colon) must be preserved unchanged as the mount Source — never split on its
+// drive colon as a raw "host:container:mode" bind string would be.
+func TestBuildContainerRequest_WindowsPathPassedThrough(t *testing.T) {
+	winCloneRoot := `E:\Users\x\Temp\clone`
+	winJARPath := `C:\cache\validator.jar`
+	paths := rulesvalidator.Paths{
+		RulesetPath:  winCloneRoot + `\src\main\resources\Validator\RulesContracts\validation-rules.yaml`,
+		SQLInputPath: winCloneRoot + `\src\main\resources\SQLInput`,
+	}
+	req := rulesvalidator.BuildContainerRequest(testImage, winJARPath, 0, 0, winCloneRoot, paths)
+
+	foundClone := false
+	foundJAR := false
+	for _, m := range req.Mounts {
+		if m.Source == winCloneRoot {
+			foundClone = true
+		}
+		if m.Source == winJARPath {
+			foundJAR = true
+		}
+	}
+	if !foundClone {
+		t.Errorf("Windows clone root %q must appear as mount Source unchanged; mounts=%+v", winCloneRoot, req.Mounts)
+	}
+	if !foundJAR {
+		t.Errorf("Windows JAR path %q must appear as mount Source unchanged; mounts=%+v", winJARPath, req.Mounts)
 	}
 }
 

@@ -7,6 +7,20 @@ import (
 	"strings"
 )
 
+// BindMount is a cross-platform typed bind mount descriptor.
+//
+// Using separate Source and Target fields (instead of a raw "src:dst:mode"
+// bind string) means a Windows host path such as "E:\Users\..." is never
+// split on its drive-letter colon when Docker parses the mount spec.
+type BindMount struct {
+	// Source is the absolute host-side path.
+	Source string
+	// Target is the container-side absolute path.
+	Target string
+	// ReadOnly controls whether the mount is read-only inside the container.
+	ReadOnly bool
+}
+
 // ValidatorContainerRequest holds the resolved parameters for running the
 // validator JAR container.  It is intentionally a plain struct (no testcontainers
 // import) so that unit tests can assert request shape without Docker.
@@ -18,8 +32,10 @@ type ValidatorContainerRequest struct {
 	Networks []string
 	// Cmd is the container entrypoint command.
 	Cmd []string
-	// Binds is the list of volume bind mounts in "host:container[:options]" format.
-	Binds []string
+	// Mounts is the list of typed bind mounts.  Using structured fields instead
+	// of raw "host:container:mode" strings avoids Windows drive-letter colon
+	// ambiguity in bind-string parsing.
+	Mounts []BindMount
 	// Env holds additional environment variables for the container.
 	Env map[string]string
 	// User is the "UID:GID" string for --user flag (empty on non-Linux or root).
@@ -74,10 +90,14 @@ func BuildContainerRequest(
 		"-output", containerOutputReportDir,
 	}
 
-	// cloneRoot is mounted read-write so the JAR can write the JSON report inside the clone.
-	binds := []string{
-		cloneRoot + ":" + containerWorkDir + ":rw",
-		jarHostPath + ":" + containerJARPath + ":ro",
+	// Typed bind mounts avoid Windows drive-letter colon ambiguity.
+	// Source and Target are separate struct fields, so a path like "E:\..." is
+	// never split on its drive colon as a raw "host:container:mode" string would be.
+	mounts := []BindMount{
+		// cloneRoot is mounted read-write so the JAR can write the JSON report.
+		{Source: cloneRoot, Target: containerWorkDir, ReadOnly: false},
+		// JAR is mounted read-only — the container only reads it.
+		{Source: jarHostPath, Target: containerJARPath, ReadOnly: true},
 	}
 
 	env := map[string]string{
@@ -93,7 +113,7 @@ func BuildContainerRequest(
 		Image:    image,
 		Networks: nil, // no Docker network required
 		Cmd:      cmd,
-		Binds:    binds,
+		Mounts:   mounts,
 		Env:      env,
 		User:     user,
 	}

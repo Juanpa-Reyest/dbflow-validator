@@ -8,6 +8,7 @@ import (
 	"runtime"
 
 	dockercontainer "github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -152,13 +153,26 @@ type dockerRunner struct{}
 // waits for exit, and returns the full output string.
 // Exit code is intentionally ignored — gate decisions are made on JSON content.
 func (d *dockerRunner) RunValidator(ctx context.Context, req ValidatorContainerRequest) (string, error) {
+	// Convert typed BindMount descriptors to docker mount.Mount structs.
+	// Using hc.Mounts (typed) instead of hc.Binds (raw strings) avoids Windows
+	// drive-letter colon ambiguity: Source and Target are separate struct fields.
+	dockerMounts := make([]mount.Mount, len(req.Mounts))
+	for i, bm := range req.Mounts {
+		dockerMounts[i] = mount.Mount{
+			Type:     mount.TypeBind,
+			Source:   bm.Source,
+			Target:   bm.Target,
+			ReadOnly: bm.ReadOnly,
+		}
+	}
+
 	tcReq := testcontainers.ContainerRequest{
 		Image:    req.Image,
 		Networks: req.Networks,
 		Cmd:      req.Cmd,
 		Env:      req.Env,
 		HostConfigModifier: func(hc *dockercontainer.HostConfig) {
-			hc.Binds = req.Binds
+			hc.Mounts = dockerMounts
 		},
 		WaitingFor: wait.ForExit(),
 	}
