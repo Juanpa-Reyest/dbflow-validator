@@ -3,9 +3,33 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
+
+// TestRyukDisabledIsSetByMain verifies that TESTCONTAINERS_RYUK_DISABLED=true is
+// present in the process environment after main's entry point executes, before any
+// testcontainers call. run() exits 2 on missing token/repo-url, but the env var must
+// already be set by then.
+func TestRyukDisabledIsSetByMain(t *testing.T) {
+	// Reset env to ensure we are measuring the side-effect of our code, not a pre-set value.
+	os.Unsetenv("TESTCONTAINERS_RYUK_DISABLED")
+
+	args := []string{} // triggers exit 2 (no repo-url), but env is set first
+	env := func(k string) string {
+		if k == "DBFLOW_GIT_TOKEN" {
+			return "fake-token"
+		}
+		return ""
+	}
+	run(args, env)
+
+	got := os.Getenv("TESTCONTAINERS_RYUK_DISABLED")
+	if got != "true" {
+		t.Errorf("TESTCONTAINERS_RYUK_DISABLED = %q; want \"true\" (must be set before any testcontainers call)", got)
+	}
+}
 
 // TestHelp_Flag verifies that --help and -h print a usage message to stdout and exit 0.
 func TestHelp_Flag(t *testing.T) {
