@@ -7,52 +7,89 @@ import (
 	"strings"
 )
 
-// BindMount is a cross-platform typed bind mount descriptor.
+// CopyDir describes a directory to be copied into the validator container before it starts.
+// HostPath is the source on the host; ContainerParent is the parent directory inside the
+// container under which the directory will land.
 //
-// Using separate Source and Target fields (instead of a raw "src:dst:mode"
-// bind string) means a Windows host path such as "E:\Users\..." is never
-// split on its drive-letter colon when Docker parses the mount spec.
-type BindMount struct {
-	// Source is the absolute host-side path.
-	Source string
-	// Target is the container-side absolute path.
-	Target string
-	// ReadOnly controls whether the mount is read-only inside the container.
-	ReadOnly bool
+// testcontainers-go CopyDirToContainer semantics (v0.42.0):
+//
+//	CopyDirToContainer(ctx, hostDir, containerParent, mode)
+//
+// places hostDir at: path.Dir(containerParent) + "/" + filepath.Base(hostDir)
+// NOT at containerParent itself. To land hostDir at "/work/<base>", pass
+// containerParent = "/work/_" so that Dir("/work/_") = "/work".
+//
+// ContainerParent is therefore the "sibling anchor" — callers must use a value
+// whose parent directory equals the desired destination parent. Use
+// cloneContainerParent() to derive the correct value.
+type CopyDir struct {
+	HostPath        string
+	ContainerParent string
 }
 
 // ValidatorContainerRequest holds the resolved parameters for running the
-// validator JAR container.  It is intentionally a plain struct (no testcontainers
+// validator JAR container. It is intentionally a plain struct (no testcontainers
 // import) so that unit tests can assert request shape without Docker.
+//
+// No host bind mounts are used. The JAR is copied via CopyFileToContainer before
+// Start; directories are copied via CopyDirToContainer before Start.
 type ValidatorContainerRequest struct {
 	// Image is the Docker image, e.g. "maven:3.9-eclipse-temurin-21".
 	Image string
-	// Networks lists the Docker networks to join.  Empty for the validator
+	// Networks lists the Docker networks to join. Empty for the validator
 	// (it does not need to reach the database).
 	Networks []string
 	// Cmd is the container entrypoint command.
 	Cmd []string
-	// Mounts is the list of typed bind mounts.  Using structured fields instead
-	// of raw "host:container:mode" strings avoids Windows drive-letter colon
-	// ambiguity in bind-string parsing.
-	Mounts []BindMount
+	// JarHostPath is the host-side absolute path to the extracted validator JAR.
+	JarHostPath string
+	// JarContainerPath is the container-side path where the JAR is copied before Start.
+	// Always /val/validator.jar.
+	JarContainerPath string
+	// CopyDirs lists host directories to copy into the container before Start.
+	// Each entry is copied via CopyDirToContainer(ctx, entry.HostPath, entry.ContainerParent, mode).
+	// See the CopyDir doc comment for the landing-rule semantics.
+	CopyDirs []CopyDir
+	// ProjectRoot is the container-side root path where cloneRoot contents land after
+	// CopyDirToContainer. Equals "/work/" + filepath.Base(cloneRoot). The WorkingDir
+	// and all in-container paths (-cf, -sp, -output, report copy-out) are relative to this.
+	ProjectRoot string
+	// ReportContainerPath is the container-side path of the JSON report written by the JAR.
+	ReportContainerPath string
+	// ReportHostPath is the host-side path where the report is written after CopyFileFromContainer.
+	// Equals ReportPath(cloneRoot). Written before ReadReportFile so the retained clone contains evidence.
+	ReportHostPath string
 	// Env holds additional environment variables for the container.
 	Env map[string]string
 	// User is the "UID:GID" string for --user flag (empty on non-Linux or root).
 	User string
 }
 
-// containerWorkDir is the directory where cloneRoot is mounted inside the container.
-const containerWorkDir = "/work"
+// containerWorkParent is the container-side directory under which the clone directory lands.
+// CopyDirToContainer places hostDir at Dir(containerParent)+"/"+Base(hostDir), so passing
+// "/work/_" as containerParent results in the clone landing at "/work/<Base(hostDir)>".
+const containerWorkParent = "/work/_"
 
 // containerJARPath is the fixed container-side path for the validator JAR.
 const containerJARPath = "/val/validator.jar"
 
-// containerOutputReportDir is the container-side path for the -output flag.
-// The JAR writes the JSON report at <containerOutputReportDir>/report/json/validation_report.json.
-// This path must be under /work (the cloneRoot mount) so the report lands on the host filesystem
-// and the workspace-retention logic can expose it as evidence on failure.
-const containerOutputReportDir = containerWorkDir + "/src/main/resources/Validator/outputReport"
+// containerOutputReportSuffix is the path suffix appended to ProjectRoot to get the
+// -output flag value. The JAR writes the JSON report at <outputDir>/report/json/validation_report.json.
+const containerOutputReportSuffix = "/src/main/resources/Validator/outputReport"
+
+// containerReportSuffix is the suffix appended to ProjectRoot to get the full container-side
+// path to the JSON report file.
+const containerReportSuffix = containerOutputReportSuffix + "/report/json/validation_report.json"
+
+// cloneProjectRoot returns the container-side root where cloneRoot will land after
+// CopyDirToContainer with ContainerParent = containerWorkParent.
+//
+// Landing rule: Dir(containerWorkParent) + "/" + Base(cloneRoot)
+//             = "/work"               + "/" + Base(cloneRoot)
+//             = "/work/<base>"
+func cloneProjectRoot(cloneRoot string) string {
+	return "/work/" + filepath.Base(cloneRoot)
+}
 
 // BuildContainerRequest constructs the container request for a validator run.
 //
@@ -60,13 +97,17 @@ const containerOutputReportDir = containerWorkDir + "/src/main/resources/Validat
 //   - Image: the provided image (default: maven:3.9-eclipse-temurin-21).
 //   - NO Docker networks (the validator does not touch the database).
 //   - Cmd: java -jar /val/validator.jar validate -cf <rules> -sp <sqlinput> -output <outputDir>
-//   - Binds: cloneRoot:/work:rw (rw so the container can write the JSON report), jarHostPath:/val/validator.jar:ro
+//   - JarHostPath/JarContainerPath: JAR copied before Start via CopyFileToContainer.
+//   - CopyDirs: whole clone (cloneRoot) → ContainerParent "/work/_" so the clone
+//     lands at "/work/<Base(cloneRoot)>" (ProjectRoot).
+//   - ReportContainerPath: ProjectRoot + "/src/main/resources/Validator/outputReport/report/json/validation_report.json"
+//   - ReportHostPath: ReportPath(cloneRoot) — where the report lands after CopyFileFromContainer.
 //   - Env: HOME=/tmp (suppress /root/.m2 permission warning)
 //   - User: UID:GID on Linux when UID != 0
 //
-// Container paths are derived by replacing the cloneRoot prefix with /work.
-// The -output flag points to <containerWorkDir>/src/main/resources/Validator/outputReport
-// so the report is written inside the clone and retained as evidence on failure.
+// Container paths are derived by replacing the cloneRoot prefix with ProjectRoot.
+// The -output flag points to ProjectRoot + "/src/main/resources/Validator/outputReport"
+// so the report is written inside the container project root and can be copied out after execution.
 func BuildContainerRequest(
 	image, jarHostPath string,
 	uid, gid int,
@@ -77,10 +118,17 @@ func BuildContainerRequest(
 		image = "maven:3.9-eclipse-temurin-21"
 	}
 
-	// Derive container-side paths by swapping cloneRoot prefix for /work.
+	// projectRoot is the container-side directory where the clone will land.
+	// CopyDirToContainer(ctx, cloneRoot, "/work/_", ...) places the clone at
+	// Dir("/work/_") + "/" + Base(cloneRoot) = "/work/" + Base(cloneRoot).
+	projectRoot := cloneProjectRoot(cloneRoot)
+
+	// Derive container-side paths by swapping the cloneRoot prefix for projectRoot.
 	// filepath.ToSlash ensures forward slashes in container paths.
-	containerRulesetPath := toContainerPath(cloneRoot, paths.RulesetPath)
-	containerSQLInputPath := toContainerPath(cloneRoot, paths.SQLInputPath)
+	containerRulesetPath := toContainerPath(cloneRoot, projectRoot, paths.RulesetPath)
+	containerSQLInputPath := toContainerPath(cloneRoot, projectRoot, paths.SQLInputPath)
+	containerOutputReportDir := projectRoot + containerOutputReportSuffix
+	containerReportPath := projectRoot + containerReportSuffix
 
 	cmd := []string{
 		"java", "-jar", containerJARPath,
@@ -88,16 +136,6 @@ func BuildContainerRequest(
 		"-cf", containerRulesetPath,
 		"-sp", containerSQLInputPath,
 		"-output", containerOutputReportDir,
-	}
-
-	// Typed bind mounts avoid Windows drive-letter colon ambiguity.
-	// Source and Target are separate struct fields, so a path like "E:\..." is
-	// never split on its drive colon as a raw "host:container:mode" string would be.
-	mounts := []BindMount{
-		// cloneRoot is mounted read-write so the JAR can write the JSON report.
-		{Source: cloneRoot, Target: containerWorkDir, ReadOnly: false},
-		// JAR is mounted read-only — the container only reads it.
-		{Source: jarHostPath, Target: containerJARPath, ReadOnly: true},
 	}
 
 	env := map[string]string{
@@ -113,19 +151,30 @@ func BuildContainerRequest(
 		Image:    image,
 		Networks: nil, // no Docker network required
 		Cmd:      cmd,
-		Mounts:   mounts,
-		Env:      env,
-		User:     user,
+		// JAR is copied before Start via CopyFileToContainer.
+		JarHostPath:      jarHostPath,
+		JarContainerPath: containerJARPath,
+		// Clone root is copied under /work before Start.
+		// ContainerParent = "/work/_" → clone lands at "/work/<Base(cloneRoot)>" = ProjectRoot.
+		CopyDirs: []CopyDir{
+			{HostPath: cloneRoot, ContainerParent: containerWorkParent},
+		},
+		ProjectRoot: projectRoot,
+		// Report locations.
+		ReportContainerPath: containerReportPath,
+		ReportHostPath:      ReportPath(cloneRoot),
+		Env:                 env,
+		User:                user,
 	}
 }
 
 // toContainerPath converts a host absolute path inside cloneRoot to its
-// container-side equivalent under /work.
-func toContainerPath(cloneRoot, hostPath string) string {
+// container-side equivalent under projectRoot.
+func toContainerPath(cloneRoot, projectRoot, hostPath string) string {
 	rel, err := filepath.Rel(cloneRoot, hostPath)
 	if err != nil || strings.HasPrefix(rel, "..") {
 		// Fallback: use the original path (should not happen in well-formed input).
 		return hostPath
 	}
-	return containerWorkDir + "/" + filepath.ToSlash(rel)
+	return projectRoot + "/" + filepath.ToSlash(rel)
 }

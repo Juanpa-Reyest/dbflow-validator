@@ -5,12 +5,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	dockercontainer "github.com/moby/moby/api/types/container"
-	"github.com/moby/moby/api/types/mount"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -25,8 +25,9 @@ const DefaultImage = "maven:3.9-eclipse-temurin-21"
 //
 // Architecture:
 //   - The container joins a shared Docker network (same as the Postgres container).
-//   - The archetype clone directory is mounted at /work (read-write).
-//   - The vendored Maven repo is mounted at /m2 (read-only) for offline resolution.
+//   - The archetype clone directory is copied INTO the container at /work via CopyDirToContainer.
+//   - The vendored Maven repo is copied INTO the container at /m2 via CopyDirToContainer.
+//   - No host bind mounts are used — Docker Desktop file-sharing prompts never appear.
 //   - Maven is invoked as: mvn -f /work/pom.xml -B -s /work/settings.xml
 //     -Dmaven.repo.local=/m2 <goal> -Dparams=<...>
 //   - stdout/stderr are streamed live and captured for the trace.
@@ -74,24 +75,54 @@ func (r *ContainerRunner) SetNetworkName(name string) {
 // that HOME=/tmp is set to prevent the /root/.m2 permission warning).
 //
 // The request sets:
-//   - Image, Networks, Cmd (mvn invocation), HostConfigModifier (volume mounts).
+//   - Image, Networks, Cmd (mvn invocation). No host bind mounts.
 //   - Env["HOME"] = "/tmp" so Maven writes .m2 to /tmp instead of /root/.m2.
 //     This suppresses "mkdir: cannot create directory '/root': Permission denied"
 //     when the container runs as a non-root host UID (via --user UID:GID).
-//   - ConfigModifier: WorkingDir=/work, and --user UID:GID on Linux (non-root).
+//   - ConfigModifier: WorkingDir=cloneProjectRoot, and --user UID:GID on Linux (non-root).
+//   - Started: false — caller must CopyDirToContainer then c.Start manually.
+//
+// CopyDirToContainer landing rule (testcontainers-go v0.42.0):
+//
+//	CopyDirToContainer(ctx, hostDir, containerParent, mode) places hostDir at
+//	path.Dir(containerParent) + "/" + filepath.Base(hostDir), NOT at containerParent.
+//
+// To land cloneRoot at "/work/<Base(cloneRoot)>", Run passes "/work/_" as containerParent.
+// To land repoCachePath at "/m2/<Base(repoCachePath)>", Run passes "/m2/_" as containerParent.
+// BuildContainerRequest computes those derived paths and uses them in the cmd and WorkingDir.
 func BuildContainerRequest(
 	image, networkName, repoCachePath string,
 	uid, gid int,
 	cloneRoot, goal string,
 	params []string,
 ) testcontainers.ContainerRequest {
+	// cloneProjectRoot is where CopyDirToContainer lands cloneRoot.
+	//
+	// CopyDirToContainer(ctx, cloneRoot, "/work/_", mode):
+	//   parent = Dir("/work/_") = "/work"   (Docker creates this via ConfigModifier.WorkingDir)
+	//   landing = "/work/" + Base(cloneRoot)
+	cloneProjectRoot := "/work/" + filepath.Base(cloneRoot)
+
+	// m2Root is where CopyDirToContainer lands repoCachePath.
+	//
+	// CopyDirToContainer(ctx, repoCachePath, "/tmp/_", mode):
+	//   parent = Dir("/tmp/_") = "/tmp"   (/tmp always exists in any container)
+	//   landing = "/tmp/" + Base(repoCachePath)
+	//
+	// When repoCachePath is empty, no copy is done; Maven resolves deps online.
+	// The placeholder value here is never used in that case.
+	m2Root := "/tmp/m2"
+	if repoCachePath != "" {
+		m2Root = "/tmp/" + filepath.Base(repoCachePath)
+	}
+
 	paramStr := strings.Join(params, " ")
 	cmd := []string{
 		"mvn",
-		"-f", "/work/pom.xml",
+		"-f", cloneProjectRoot + "/pom.xml",
 		"-B",
-		"-s", "/work/settings.xml",
-		"-Dmaven.repo.local=/m2",
+		"-s", cloneProjectRoot + "/settings.xml",
+		"-Dmaven.repo.local=" + m2Root,
 		goal,
 		"-Dparams=" + paramStr,
 	}
@@ -107,42 +138,18 @@ func BuildContainerRequest(
 		Env: map[string]string{
 			"HOME": "/tmp",
 		},
-		HostConfigModifier: func(hc *dockercontainer.HostConfig) {
-			// Use typed mounts instead of raw "host:container:mode" bind strings.
-			// Typed mounts (hc.Mounts) keep Source and Target as separate struct
-			// fields, so a Windows path like "E:\..." is never split on its
-			// drive-letter colon during Docker's bind-string parse.
-			mounts := []mount.Mount{
-				{
-					Type:     mount.TypeBind,
-					Source:   cloneRoot,
-					Target:   "/work",
-					ReadOnly: false,
-				},
-			}
-			if repoCachePath != "" {
-				mounts = append(mounts, mount.Mount{
-					Type:     mount.TypeBind,
-					Source:   repoCachePath,
-					Target:   "/m2",
-					ReadOnly: true,
-				})
-			}
-			hc.Mounts = mounts
-		},
+		// No HostConfigModifier: no bind mounts. Directories are copied in via
+		// CopyDirToContainer after the container is created (see Run).
 		// Wait until the Maven container exits before returning from GenericContainer.
 		// Timeout is intentionally absent — context cancellation handles deadline.
 		WaitingFor: wait.ForExit(),
 	}
 
-	// ConfigModifier sets the working directory to /work (so Java's user.dir is the
-	// project root, resolving relative paths correctly) and the --user flag on Linux
-	// (so files written into /work are owned by the host user, not root).
+	// ConfigModifier sets the working directory to cloneProjectRoot (so Java's user.dir is
+	// the project root, resolving relative paths correctly) and the --user flag on Linux.
 	req.ConfigModifier = func(c *dockercontainer.Config) {
-		c.WorkingDir = "/work"
-		// Set --user on Linux when not running as root so files written into /work
-		// (the mounted clone dir) are owned by the host user, not root.
-		// Skipped on non-Linux and when UID=0 (root) to avoid permission issues.
+		c.WorkingDir = cloneProjectRoot
+		// Set --user on Linux when not running as root.
 		if runtime.GOOS == "linux" && uid != 0 {
 			c.User = fmt.Sprintf("%d:%d", uid, gid)
 		}
@@ -154,12 +161,15 @@ func BuildContainerRequest(
 // Run executes mvn inside a freshly-created Maven container on the shared Docker network.
 //
 // The container:
-//   - Mounts cloneRoot at /work (rw) — pom.xml, settings.xml, and archetype sources.
-//   - Mounts repoCachePath at /m2 (ro) — vendored plugin + JDBC driver for offline resolution.
+//   - Is CREATED (not started) via GenericContainer with Started:false.
+//   - cloneRoot is copied into /work via CopyDirToContainer before the container starts.
+//   - repoCachePath is copied into /m2 via CopyDirToContainer (when non-empty).
+//   - Container is then started with c.Start(ctx).
+//   - No host bind mounts are used — Docker Desktop file-sharing prompts never appear.
 //   - Runs as the host UID:GID on Linux so files written into /work are not root-owned.
-//   - Sets HOME=/tmp so Maven does not attempt to write to /root/.m2 (permission warning fix).
+//   - Sets HOME=/tmp so Maven does not attempt to write to /root/.m2.
 //   - Streams stdout/stderr to `out` and captures the full trace.
-//   - Is removed when Run returns (AutoRemove / Terminate).
+//   - Is removed when Run returns (Terminate; safe even if Start failed).
 //
 // Exit-code mapping:
 //   - exit 0 AND no "BUILD FAILURE" in stdout → StepStatusPassed
@@ -185,12 +195,66 @@ func (r *ContainerRunner) Run(
 		cloneRoot, goal, finalParams,
 	)
 
+	// Create the container without starting it (Started:false) so we can copy
+	// directories in before execution begins.
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
-		Started:          true,
+		Started:          false,
 	})
 	if err != nil {
-		// Check if context was cancelled before the container even started.
+		// Check if context was cancelled before the container was even created.
+		if ctx.Err() != nil {
+			return domain.StepResult{
+				Name:     goal,
+				Status:   domain.StepStatusAborted,
+				Error:    fmt.Sprintf("context cancelled before container create: %v", ctx.Err()),
+				Duration: time.Since(start),
+			}, nil
+		}
+		return domain.StepResult{}, fmt.Errorf("create maven container: %w", err)
+	}
+	// Terminate is safe even on a created-but-not-started container (no-op if not running).
+	defer func() { _ = c.Terminate(ctx) }()
+
+	// Copy cloneRoot into the container under /work.
+	//
+	// CopyDirToContainer landing rule: Dir(containerParent) + "/" + Base(hostDir).
+	// Passing "/work/_" as containerParent → Dir("/work/_") = "/work"
+	// → clone lands at "/work/" + Base(cloneRoot) = cloneProjectRoot.
+	// This matches the path used in the cmd (-f, -s) and ConfigModifier.WorkingDir.
+	if err := c.CopyDirToContainer(ctx, cloneRoot, "/work/_", 0o755); err != nil {
+		if ctx.Err() != nil {
+			return domain.StepResult{
+				Name:     goal,
+				Status:   domain.StepStatusAborted,
+				Error:    fmt.Sprintf("context cancelled during copy-in: %v", ctx.Err()),
+				Duration: time.Since(start),
+			}, nil
+		}
+		return domain.StepResult{}, fmt.Errorf("copy clone into maven container: %w", err)
+	}
+
+	// Copy vendored Maven repo into the container under /tmp (optional — absent means online resolution).
+	//
+	// Landing rule: CopyDirToContainer(ctx, repoCachePath, "/tmp/_", mode)
+	//   parent = Dir("/tmp/_") = "/tmp"   (/tmp always exists in any container image)
+	//   landing = "/tmp/" + Base(repoCachePath) = m2Root used in -Dmaven.repo.local.
+	if r.repoCachePath != "" {
+		if err := c.CopyDirToContainer(ctx, r.repoCachePath, "/tmp/_", 0o755); err != nil {
+			if ctx.Err() != nil {
+				return domain.StepResult{
+					Name:     goal,
+					Status:   domain.StepStatusAborted,
+					Error:    fmt.Sprintf("context cancelled during m2 copy-in: %v", ctx.Err()),
+					Duration: time.Since(start),
+				}, nil
+			}
+			return domain.StepResult{}, fmt.Errorf("copy Maven repo into container: %w", err)
+		}
+	}
+
+	// Start the container now that all inputs are present inside it.
+	if err := c.Start(ctx); err != nil {
 		if ctx.Err() != nil {
 			return domain.StepResult{
 				Name:     goal,
@@ -201,7 +265,6 @@ func (r *ContainerRunner) Run(
 		}
 		return domain.StepResult{}, fmt.Errorf("start maven container: %w", err)
 	}
-	defer func() { _ = c.Terminate(ctx) }()
 
 	// Collect container logs (stdout+stderr combined) for the trace.
 	var capture bytes.Buffer

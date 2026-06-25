@@ -111,6 +111,11 @@ func main() {
 // run is the testable entry point. It returns the process exit code.
 // Version and help output go to os.Stdout.
 func run(args []string, env func(string) string) int {
+	// Disable the Ryuk reaper before any testcontainers call. This is the FIRST
+	// side-effectful statement in the entry point so it fires unconditionally on every OS.
+	// Cleanup is already handled by CleanupRegistry (LIFO, run-once, eager+deferred RunAll),
+	// so Ryuk is redundant and its absence does not weaken any cleanup guarantee.
+	os.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true") //nolint:errcheck // always succeeds
 	return runWithHelpOutput(args, env, os.Stdout, os.Stdout)
 }
 

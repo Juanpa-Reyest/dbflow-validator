@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/rulesvalidator"
@@ -105,55 +104,27 @@ func TestReportPath_ReturnsExpectedSubpath(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// request.go: -output flag in Cmd + cloneRoot mounted read-write
+// request.go: -output flag in Cmd + report host path set (no bind mounts)
 // ---------------------------------------------------------------------------
 
-func TestBuildContainerRequest_CmdContainsOutputFlag(t *testing.T) {
+// (Tests for -output flag and report paths are in request_test.go.)
+// TestBuildContainerRequest_ReportHostPath_MatchesReportPath asserts that
+// req.ReportHostPath equals ReportPath(cloneRoot) — the host-side evidence path.
+func TestBuildContainerRequest_ReportHostPath_MatchesReportPath(t *testing.T) {
 	req := buildTestRequest(t)
-	joined := strings.Join(req.Cmd, " ")
-	if !strings.Contains(joined, "-output") {
-		t.Errorf("Cmd must contain -output flag for JSON report; cmd=%v", req.Cmd)
+	want := rulesvalidator.ReportPath(testCloneRoot)
+	if req.ReportHostPath != want {
+		t.Errorf("ReportHostPath = %q, want ReportPath(cloneRoot) = %q", req.ReportHostPath, want)
 	}
-}
-
-func TestBuildContainerRequest_OutputPointsToOutputReportInWork(t *testing.T) {
-	req := buildTestRequest(t)
-	var outputVal string
-	for i, arg := range req.Cmd {
-		if arg == "-output" && i+1 < len(req.Cmd) {
-			outputVal = req.Cmd[i+1]
-			break
-		}
-	}
-	if outputVal == "" {
-		t.Fatalf("Cmd missing -output value; cmd=%v", req.Cmd)
-	}
-	want := "/work/src/main/resources/Validator/outputReport"
-	if outputVal != want {
-		t.Errorf("-output value = %q, want %q", outputVal, want)
-	}
-}
-
-func TestBuildContainerRequest_CloneRootMountedReadWrite(t *testing.T) {
-	req := buildTestRequest(t)
-	// The cloneRoot mount must be read-write so the container can write the report.
-	for _, m := range req.Mounts {
-		if m.Source == testCloneRoot && m.Target == "/work" {
-			if m.ReadOnly {
-				t.Errorf("cloneRoot mount must not be ReadOnly (container must write report); mount=%+v", m)
-			}
-			return
-		}
-	}
-	t.Errorf("cloneRoot:/work mount not found; mounts=%+v", req.Mounts)
 }
 
 // ---------------------------------------------------------------------------
 // validator.go: file-based flow
 //
 // fileWritingRunner is a ContainerRunner test double that writes a canned JSON
-// report file into the cloneRoot's expected outputReport path, simulating what
-// the real JAR does when called with -output.
+// report file to req.ReportHostPath, simulating what the real dockerRunner does:
+// it runs the JAR and then copies the report out to ReportHostPath via
+// CopyFileFromContainer + os.WriteFile.
 // ---------------------------------------------------------------------------
 
 type fileWritingRunner struct {
@@ -168,18 +139,12 @@ func (f *fileWritingRunner) RunValidator(
 	if f.err != nil {
 		return "", f.err
 	}
-	// Derive the host-side cloneRoot from the typed mounts: the mount targeting /work.
-	var cloneRoot string
-	for _, m := range req.Mounts {
-		if m.Target == "/work" {
-			cloneRoot = m.Source
-			break
-		}
+	// Use req.ReportHostPath directly — the real dockerRunner writes here after
+	// CopyFileFromContainer. Test doubles mirror that contract.
+	reportPath := req.ReportHostPath
+	if reportPath == "" {
+		return "", errors.New("fileWritingRunner: req.ReportHostPath is empty")
 	}
-	if cloneRoot == "" {
-		return "", errors.New("fileWritingRunner: no /work mount found in request")
-	}
-	reportPath := rulesvalidator.ReportPath(cloneRoot)
 	if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
 		return "", err
 	}
