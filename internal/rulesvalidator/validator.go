@@ -5,10 +5,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"runtime"
 
 	dockercontainer "github.com/moby/moby/api/types/container"
-	"github.com/moby/moby/api/types/mount"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -43,11 +44,11 @@ type ContainerRunner interface {
 //  5. Extracting and parsing the JSON report.
 //  6. Applying the gate decision.
 type ContainerValidator struct {
-	image        string
-	jarPath      string
-	uid          int
-	gid          int
-	runner       ContainerRunner
+	image   string
+	jarPath string
+	uid     int
+	gid     int
+	runner  ContainerRunner
 	// validatorOut receives the container's combined stdout+stderr on every run,
 	// regardless of outcome. Nil means discard (default, backward-compatible).
 	validatorOut io.Writer
@@ -90,9 +91,9 @@ func New(image, jarPath string, uid, gid int, runner ContainerRunner, opts ...Op
 // Flow:
 //  1. Locate ruleset YAML and SQLInput dir inside cloneRoot (fails fast on missing ruleset).
 //  2. Build container request (includes -output pointing inside the clone).
-//  3. Run the JAR container — the JAR writes the JSON report to
-//     <cloneRoot>/src/main/resources/Validator/outputReport/report/json/validation_report.json.
-//  4. Read and parse the JSON report file from the host filesystem.
+//  3. Run the JAR container — dockerRunner handles copy-in, execution, and copy-out.
+//     The JSON report is written to req.ReportHostPath by RunValidator.
+//  4. Read and parse the JSON report file from the host filesystem (ReportPath(cloneRoot)).
 //  5. Apply the gate decision.
 //
 // Returns ("", nil) when globalSummary.status is "PASS" or "INFO" and no output
@@ -115,6 +116,8 @@ func (v *ContainerValidator) ValidatePreSync(ctx context.Context, cloneRoot stri
 	req := BuildContainerRequest(v.image, v.jarPath, v.uid, v.gid, cloneRoot, paths)
 
 	// Step 3: Run the container.
+	// RunValidator handles: create (Started:false) + JAR via Files + CopyDirToContainer clone →
+	// /work + Start + log capture + Terminate + CopyFileFromContainer report → os.WriteFile(ReportHostPath).
 	// The string return is the JAR's combined stdout+stderr (logger output).
 	// Tee to validatorOut (the live sink, mirrors Maven's MavenOut tee) BEFORE
 	// any gate decision so evidence is always recorded — even on failure paths.
@@ -127,7 +130,8 @@ func (v *ContainerValidator) ValidatePreSync(ctx context.Context, cloneRoot stri
 		return containerLog, fmt.Errorf("pre-sync-validate: container execution: %w", runErr)
 	}
 
-	// Step 4: Read JSON report file written by the JAR into the clone.
+	// Step 4: Read JSON report file written to the host by RunValidator.
+	// ReportHostPath == ReportPath(cloneRoot); already written by RunValidator before we get here.
 	reportPath := ReportPath(cloneRoot)
 	rpt, err := ReadReportFile(reportPath)
 	if err != nil {
@@ -149,30 +153,32 @@ func (v *ContainerValidator) ValidatePreSync(ctx context.Context, cloneRoot stri
 // dockerRunner is the production ContainerRunner that uses testcontainers-go.
 type dockerRunner struct{}
 
-// RunValidator starts the validator container, captures combined stdout+stderr,
-// waits for exit, and returns the full output string.
+// RunValidator runs the validator container using the copy-in/copy-out lifecycle:
+//
+//  1. Create container (Started:false) with the JAR as a ContainerFile (copied at create).
+//  2. CopyDirToContainer for each CopyDir in req (clone → /work).
+//  3. Start the container.
+//  4. Capture logs (stdout+stderr).
+//  5. Terminate (deferred; safe on a never-started container too).
+//  6. CopyFileFromContainer the JSON report from req.ReportContainerPath.
+//  7. os.WriteFile the report bytes to req.ReportHostPath (failure-retention: report
+//     lands in the clone BEFORE ReadReportFile; retained workspace contains it as evidence).
+//
+// Returns the combined container log string and nil on success.
 // Exit code is intentionally ignored — gate decisions are made on JSON content.
 func (d *dockerRunner) RunValidator(ctx context.Context, req ValidatorContainerRequest) (string, error) {
-	// Convert typed BindMount descriptors to docker mount.Mount structs.
-	// Using hc.Mounts (typed) instead of hc.Binds (raw strings) avoids Windows
-	// drive-letter colon ambiguity: Source and Target are separate struct fields.
-	dockerMounts := make([]mount.Mount, len(req.Mounts))
-	for i, bm := range req.Mounts {
-		dockerMounts[i] = mount.Mount{
-			Type:     mount.TypeBind,
-			Source:   bm.Source,
-			Target:   bm.Target,
-			ReadOnly: bm.ReadOnly,
-		}
-	}
-
 	tcReq := testcontainers.ContainerRequest{
 		Image:    req.Image,
 		Networks: req.Networks,
 		Cmd:      req.Cmd,
 		Env:      req.Env,
-		HostConfigModifier: func(hc *dockercontainer.HostConfig) {
-			hc.Mounts = dockerMounts
+		// JAR is copied at container-create time via Files — no bind mount needed.
+		Files: []testcontainers.ContainerFile{
+			{
+				HostFilePath:      req.JarHostPath,
+				ContainerFilePath: req.JarContainerPath,
+				FileMode:          0o644,
+			},
 		},
 		WaitingFor: wait.ForExit(),
 	}
@@ -184,18 +190,39 @@ func (d *dockerRunner) RunValidator(ctx context.Context, req ValidatorContainerR
 		}
 	}
 
+	// Create without starting so we can copy directories in before execution.
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: tcReq,
-		Started:          true,
+		Started:          false,
 	})
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("context cancelled before container create: %w", ctx.Err())
+		}
+		return "", fmt.Errorf("create validator container: %w", err)
+	}
+	// Terminate is safe even on a created-but-not-started container (no-op).
+	defer func() { _ = c.Terminate(ctx) }()
+
+	// Copy each CopyDir into the container before starting it.
+	for _, cd := range req.CopyDirs {
+		if err := c.CopyDirToContainer(ctx, cd.HostPath, cd.ContainerParent, 0o755); err != nil {
+			if ctx.Err() != nil {
+				return "", fmt.Errorf("context cancelled during copy-in: %w", ctx.Err())
+			}
+			return "", fmt.Errorf("copy %q into validator container at %q: %w", cd.HostPath, cd.ContainerParent, err)
+		}
+	}
+
+	// Start the container now that all inputs are present.
+	if err := c.Start(ctx); err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("context cancelled before container start: %w", ctx.Err())
 		}
 		return "", fmt.Errorf("start validator container: %w", err)
 	}
-	defer func() { _ = c.Terminate(ctx) }()
 
+	// Capture logs.
 	var buf bytes.Buffer
 	logs, logsErr := c.Logs(ctx)
 	if logsErr != nil && ctx.Err() == nil {
@@ -206,5 +233,26 @@ func (d *dockerRunner) RunValidator(ctx context.Context, req ValidatorContainerR
 		logs.Close()
 	}
 
-	return buf.String(), nil
+	containerLog := buf.String()
+
+	// Copy the JSON report out of the container to the host clone path.
+	// This must happen BEFORE ReadReportFile is called (in ValidatePreSync step 4).
+	// Writing to ReportHostPath ensures failure-retention: the workspace clone
+	// contains the evidence report when it is retained on a failed run.
+	if req.ReportContainerPath != "" && req.ReportHostPath != "" {
+		rc, copyErr := c.CopyFileFromContainer(ctx, req.ReportContainerPath)
+		if copyErr == nil {
+			defer rc.Close()
+			reportBytes, readErr := io.ReadAll(rc)
+			if readErr == nil && len(reportBytes) > 0 {
+				if mkdirErr := os.MkdirAll(filepath.Dir(req.ReportHostPath), 0o755); mkdirErr == nil {
+					_ = os.WriteFile(req.ReportHostPath, reportBytes, 0o644)
+				}
+			}
+		}
+		// Copy-out failures are non-fatal here: if the report is absent,
+		// ReadReportFile (step 4) will return ErrNoReport → fail-closed.
+	}
+
+	return containerLog, nil
 }

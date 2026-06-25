@@ -82,42 +82,86 @@ func TestBuildContainerRequest_CmdContainsSQLInputFlag(t *testing.T) {
 	}
 }
 
-// TestBuildContainerRequest_MountsCloneRootRW asserts that the clone root is
-// carried as a typed mount with Source=cloneRoot, Target=/work, ReadOnly=false.
-// Typed mounts (hc.Mounts) avoid Windows drive-letter colon ambiguity that
-// breaks raw bind-string parsing ("E:\...:container:mode").
-func TestBuildContainerRequest_MountsCloneRootRW(t *testing.T) {
+// TestBuildContainerRequest_NoBindMounts asserts that the new request has no Mounts field
+// at all — all I/O is via copy-in (CopyDirs, JAR Files) and copy-out (CopyFileFromContainer).
+// This is the AC-6/AC-17 gate: no TypeBind mount ever appears in the request.
+func TestBuildContainerRequest_NoBindMounts(t *testing.T) {
 	req := buildTestRequest(t)
-	for _, m := range req.Mounts {
-		if m.Source == testCloneRoot && m.Target == "/work" {
-			if m.ReadOnly {
-				t.Errorf("clone root mount must be read-write (ReadOnly=false), got ReadOnly=true")
-			}
-			return
-		}
+	// The request type no longer has a Mounts field. This test verifies the new copy-in shape.
+	// AC-6: zero bind mounts. Verified structurally: ValidatorContainerRequest has no Mounts.
+	// We assert CopyDirs is used instead.
+	if len(req.CopyDirs) == 0 {
+		t.Error("CopyDirs must be non-empty; clone must be copied in via CopyDirToContainer")
 	}
-	t.Errorf("Mounts must contain {Source:%q, Target:\"/work\", ReadOnly:false}; mounts=%+v", testCloneRoot, req.Mounts)
 }
 
-// TestBuildContainerRequest_MountsJARReadOnly asserts that the JAR host path is
-// mounted at /val/validator.jar read-only as a typed mount.
-func TestBuildContainerRequest_MountsJARReadOnly(t *testing.T) {
+// TestBuildContainerRequest_CopyDirsContainsCloneRoot asserts the clone root is scheduled
+// for copy-in at /work via CopyDirs (replacing the old /work bind mount).
+func TestBuildContainerRequest_CopyDirsContainsCloneRoot(t *testing.T) {
 	req := buildTestRequest(t)
-	for _, m := range req.Mounts {
-		if m.Source == testJARPath && m.Target == "/val/validator.jar" {
-			if !m.ReadOnly {
-				t.Errorf("JAR mount must be read-only (ReadOnly=true), got ReadOnly=false")
-			}
-			return
+	for _, cd := range req.CopyDirs {
+		if cd.HostPath == testCloneRoot && cd.ContainerParent == "/work" {
+			return // found
 		}
 	}
-	t.Errorf("Mounts must contain {Source:%q, Target:\"/val/validator.jar\", ReadOnly:true}; mounts=%+v", testJARPath, req.Mounts)
+	t.Errorf("CopyDirs must contain {HostPath:%q, ContainerParent:\"/work\"}; got=%+v", testCloneRoot, req.CopyDirs)
+}
+
+// TestBuildContainerRequest_JARFields asserts the JAR copy-in fields are set correctly.
+func TestBuildContainerRequest_JARFields(t *testing.T) {
+	req := buildTestRequest(t)
+	if req.JarHostPath != testJARPath {
+		t.Errorf("JarHostPath = %q, want %q", req.JarHostPath, testJARPath)
+	}
+	if req.JarContainerPath != "/val/validator.jar" {
+		t.Errorf("JarContainerPath = %q, want /val/validator.jar", req.JarContainerPath)
+	}
+}
+
+// TestBuildContainerRequest_ReportPaths asserts container and host report paths are set.
+func TestBuildContainerRequest_ReportPaths(t *testing.T) {
+	req := buildTestRequest(t)
+	wantContainer := "/work/src/main/resources/Validator/outputReport/report/json/validation_report.json"
+	if req.ReportContainerPath != wantContainer {
+		t.Errorf("ReportContainerPath = %q, want %q", req.ReportContainerPath, wantContainer)
+	}
+	wantHost := testCloneRoot + "/src/main/resources/Validator/outputReport/report/json/validation_report.json"
+	if req.ReportHostPath != wantHost {
+		t.Errorf("ReportHostPath = %q, want %q", req.ReportHostPath, wantHost)
+	}
+}
+
+// TestBuildContainerRequest_CmdContainsOutputFlag asserts -output is in the command.
+func TestBuildContainerRequest_CmdContainsOutputFlag(t *testing.T) {
+	req := buildTestRequest(t)
+	joined := strings.Join(req.Cmd, " ")
+	if !strings.Contains(joined, "-output") {
+		t.Errorf("Cmd must contain -output flag for JSON report; cmd=%v", req.Cmd)
+	}
+}
+
+func TestBuildContainerRequest_OutputPointsToOutputReportInWork(t *testing.T) {
+	req := buildTestRequest(t)
+	var outputVal string
+	for i, arg := range req.Cmd {
+		if arg == "-output" && i+1 < len(req.Cmd) {
+			outputVal = req.Cmd[i+1]
+			break
+		}
+	}
+	if outputVal == "" {
+		t.Fatalf("Cmd missing -output value; cmd=%v", req.Cmd)
+	}
+	want := "/work/src/main/resources/Validator/outputReport"
+	if outputVal != want {
+		t.Errorf("-output value = %q, want %q", outputVal, want)
+	}
 }
 
 // TestBuildContainerRequest_WindowsPathPassedThrough is the regression guard for
-// the Windows bind-mount bug. A Windows-style source path (with a drive-letter
-// colon) must be preserved unchanged as the mount Source — never split on its
-// drive colon as a raw "host:container:mode" bind string would be.
+// the Windows path bug. Windows-style paths (with a drive-letter colon) must be
+// preserved unchanged as JarHostPath and CopyDirs[*].HostPath — never split on
+// their drive colon as a raw "host:container:mode" bind string would be.
 func TestBuildContainerRequest_WindowsPathPassedThrough(t *testing.T) {
 	winCloneRoot := `E:\Users\x\Temp\clone`
 	winJARPath := `C:\cache\validator.jar`
@@ -127,21 +171,18 @@ func TestBuildContainerRequest_WindowsPathPassedThrough(t *testing.T) {
 	}
 	req := rulesvalidator.BuildContainerRequest(testImage, winJARPath, 0, 0, winCloneRoot, paths)
 
+	if req.JarHostPath != winJARPath {
+		t.Errorf("JarHostPath = %q, want %q (Windows path must pass through unchanged)", req.JarHostPath, winJARPath)
+	}
 	foundClone := false
-	foundJAR := false
-	for _, m := range req.Mounts {
-		if m.Source == winCloneRoot {
+	for _, cd := range req.CopyDirs {
+		if cd.HostPath == winCloneRoot {
 			foundClone = true
-		}
-		if m.Source == winJARPath {
-			foundJAR = true
+			break
 		}
 	}
 	if !foundClone {
-		t.Errorf("Windows clone root %q must appear as mount Source unchanged; mounts=%+v", winCloneRoot, req.Mounts)
-	}
-	if !foundJAR {
-		t.Errorf("Windows JAR path %q must appear as mount Source unchanged; mounts=%+v", winJARPath, req.Mounts)
+		t.Errorf("CopyDirs must contain HostPath=%q (Windows path); got=%+v", winCloneRoot, req.CopyDirs)
 	}
 }
 

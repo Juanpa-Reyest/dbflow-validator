@@ -7,42 +7,48 @@ import (
 	"strings"
 )
 
-// BindMount is a cross-platform typed bind mount descriptor.
-//
-// Using separate Source and Target fields (instead of a raw "src:dst:mode"
-// bind string) means a Windows host path such as "E:\Users\..." is never
-// split on its drive-letter colon when Docker parses the mount spec.
-type BindMount struct {
-	// Source is the absolute host-side path.
-	Source string
-	// Target is the container-side absolute path.
-	Target string
-	// ReadOnly controls whether the mount is read-only inside the container.
-	ReadOnly bool
+// CopyDir describes a directory to be copied into the validator container before it starts.
+// HostPath is the source on the host; ContainerParent is the destination directory inside the container.
+// CopyDirToContainer copies the CONTENTS of HostPath into ContainerParent.
+type CopyDir struct {
+	HostPath        string
+	ContainerParent string
 }
 
 // ValidatorContainerRequest holds the resolved parameters for running the
-// validator JAR container.  It is intentionally a plain struct (no testcontainers
+// validator JAR container. It is intentionally a plain struct (no testcontainers
 // import) so that unit tests can assert request shape without Docker.
+//
+// No host bind mounts are used. The JAR is copied via ContainerRequest.Files at
+// create time; directories are copied via CopyDirToContainer before Start.
 type ValidatorContainerRequest struct {
 	// Image is the Docker image, e.g. "maven:3.9-eclipse-temurin-21".
 	Image string
-	// Networks lists the Docker networks to join.  Empty for the validator
+	// Networks lists the Docker networks to join. Empty for the validator
 	// (it does not need to reach the database).
 	Networks []string
 	// Cmd is the container entrypoint command.
 	Cmd []string
-	// Mounts is the list of typed bind mounts.  Using structured fields instead
-	// of raw "host:container:mode" strings avoids Windows drive-letter colon
-	// ambiguity in bind-string parsing.
-	Mounts []BindMount
+	// JarHostPath is the host-side absolute path to the extracted validator JAR.
+	JarHostPath string
+	// JarContainerPath is the container-side path where the JAR is copied at create time.
+	// Always /val/validator.jar.
+	JarContainerPath string
+	// CopyDirs lists host directories to copy into the container before Start.
+	// Each entry is copied via CopyDirToContainer(ctx, entry.HostPath, entry.ContainerParent, mode).
+	CopyDirs []CopyDir
+	// ReportContainerPath is the container-side path of the JSON report written by the JAR.
+	ReportContainerPath string
+	// ReportHostPath is the host-side path where the report is written after CopyFileFromContainer.
+	// Equals ReportPath(cloneRoot). Written before ReadReportFile so the retained clone contains evidence.
+	ReportHostPath string
 	// Env holds additional environment variables for the container.
 	Env map[string]string
 	// User is the "UID:GID" string for --user flag (empty on non-Linux or root).
 	User string
 }
 
-// containerWorkDir is the directory where cloneRoot is mounted inside the container.
+// containerWorkDir is the directory where cloneRoot contents are copied inside the container.
 const containerWorkDir = "/work"
 
 // containerJARPath is the fixed container-side path for the validator JAR.
@@ -50,9 +56,10 @@ const containerJARPath = "/val/validator.jar"
 
 // containerOutputReportDir is the container-side path for the -output flag.
 // The JAR writes the JSON report at <containerOutputReportDir>/report/json/validation_report.json.
-// This path must be under /work (the cloneRoot mount) so the report lands on the host filesystem
-// and the workspace-retention logic can expose it as evidence on failure.
 const containerOutputReportDir = containerWorkDir + "/src/main/resources/Validator/outputReport"
+
+// containerReportPath is the full container-side path to the JSON report file.
+const containerReportPath = containerOutputReportDir + "/report/json/validation_report.json"
 
 // BuildContainerRequest constructs the container request for a validator run.
 //
@@ -60,13 +67,16 @@ const containerOutputReportDir = containerWorkDir + "/src/main/resources/Validat
 //   - Image: the provided image (default: maven:3.9-eclipse-temurin-21).
 //   - NO Docker networks (the validator does not touch the database).
 //   - Cmd: java -jar /val/validator.jar validate -cf <rules> -sp <sqlinput> -output <outputDir>
-//   - Binds: cloneRoot:/work:rw (rw so the container can write the JSON report), jarHostPath:/val/validator.jar:ro
+//   - JarHostPath/JarContainerPath: JAR copied at create time via ContainerRequest.Files.
+//   - CopyDirs: whole clone (cloneRoot) copied to /work before Start.
+//   - ReportContainerPath: /work/src/main/resources/Validator/outputReport/report/json/validation_report.json
+//   - ReportHostPath: ReportPath(cloneRoot) — where the report lands after CopyFileFromContainer.
 //   - Env: HOME=/tmp (suppress /root/.m2 permission warning)
 //   - User: UID:GID on Linux when UID != 0
 //
 // Container paths are derived by replacing the cloneRoot prefix with /work.
 // The -output flag points to <containerWorkDir>/src/main/resources/Validator/outputReport
-// so the report is written inside the clone and retained as evidence on failure.
+// so the report is written inside /work and can be copied out after execution.
 func BuildContainerRequest(
 	image, jarHostPath string,
 	uid, gid int,
@@ -90,16 +100,6 @@ func BuildContainerRequest(
 		"-output", containerOutputReportDir,
 	}
 
-	// Typed bind mounts avoid Windows drive-letter colon ambiguity.
-	// Source and Target are separate struct fields, so a path like "E:\..." is
-	// never split on its drive colon as a raw "host:container:mode" string would be.
-	mounts := []BindMount{
-		// cloneRoot is mounted read-write so the JAR can write the JSON report.
-		{Source: cloneRoot, Target: containerWorkDir, ReadOnly: false},
-		// JAR is mounted read-only — the container only reads it.
-		{Source: jarHostPath, Target: containerJARPath, ReadOnly: true},
-	}
-
 	env := map[string]string{
 		"HOME": "/tmp",
 	}
@@ -113,9 +113,18 @@ func BuildContainerRequest(
 		Image:    image,
 		Networks: nil, // no Docker network required
 		Cmd:      cmd,
-		Mounts:   mounts,
-		Env:      env,
-		User:     user,
+		// JAR is copied at container-create time via ContainerRequest.Files.
+		JarHostPath:      jarHostPath,
+		JarContainerPath: containerJARPath,
+		// Clone root is copied into /work before Start.
+		CopyDirs: []CopyDir{
+			{HostPath: cloneRoot, ContainerParent: containerWorkDir},
+		},
+		// Report locations.
+		ReportContainerPath: containerReportPath,
+		ReportHostPath:      ReportPath(cloneRoot),
+		Env:                 env,
+		User:                user,
 	}
 }
 

@@ -54,8 +54,9 @@ func makeValidatorCloneRoot(t *testing.T) string {
 // logCapturingRunner — test double for ValidatorOut capture tests
 // ---------------------------------------------------------------------------
 
-// logCapturingRunner simulates the JAR: it writes a JSON report to disk AND
-// returns a fixed log string, letting tests assert what lands in ValidatorOut.
+// logCapturingRunner simulates the real dockerRunner: it writes a JSON report to
+// req.ReportHostPath (mirroring CopyFileFromContainer + os.WriteFile) and returns
+// a fixed log string, letting tests assert what lands in ValidatorOut.
 type logCapturingRunner struct {
 	reportJSON string
 	logOutput  string
@@ -69,19 +70,13 @@ func (r *logCapturingRunner) RunValidator(
 	if r.err != nil {
 		return r.logOutput, r.err
 	}
-	// Write the report file, mirroring what the real JAR does.
-	// Derive cloneRoot from the typed mount targeting /work.
-	var cloneRoot string
-	for _, m := range req.Mounts {
-		if m.Target == "/work" {
-			cloneRoot = m.Source
-			break
-		}
+	// Write the report to req.ReportHostPath — mirrors what the real dockerRunner does
+	// after CopyFileFromContainer. Test doubles must honour this contract so
+	// ValidatePreSync's ReadReportFile call finds the file at ReportPath(cloneRoot).
+	reportPath := req.ReportHostPath
+	if reportPath == "" {
+		return r.logOutput, errors.New("logCapturingRunner: req.ReportHostPath is empty")
 	}
-	if cloneRoot == "" {
-		return r.logOutput, errors.New("logCapturingRunner: no /work mount found")
-	}
-	reportPath := rulesvalidator.ReportPath(cloneRoot)
 	if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
 		return r.logOutput, err
 	}
