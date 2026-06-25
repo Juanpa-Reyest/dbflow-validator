@@ -155,42 +155,50 @@ type dockerRunner struct{}
 
 // RunValidator runs the validator container using the copy-in/copy-out lifecycle:
 //
-//  1. Create container (Started:false) with the JAR as a ContainerFile (copied at create).
-//  2. CopyDirToContainer for each CopyDir in req (clone → /work).
-//  3. Start the container.
-//  4. Capture logs (stdout+stderr).
-//  5. Terminate (deferred; safe on a never-started container too).
+//  1. Create container (Started:false, no Files — JAR copied explicitly below).
+//  2. CopyFileToContainer the JAR (req.JarHostPath → req.JarContainerPath).
+//  3. CopyDirToContainer for each CopyDir in req (clone → /work).
+//  4. Start the container (WaitingFor:ForExit blocks until the JAR process exits).
+//  5. Capture logs (stdout+stderr).
 //  6. CopyFileFromContainer the JSON report from req.ReportContainerPath.
 //  7. os.WriteFile the report bytes to req.ReportHostPath (failure-retention: report
 //     lands in the clone BEFORE ReadReportFile; retained workspace contains it as evidence).
+//  8. Terminate (deferred; safe on a never-started container too).
 //
 // Returns the combined container log string and nil on success.
 // Exit code is intentionally ignored — gate decisions are made on JSON content.
+//
+// NOTE: The JAR is copied via CopyFileToContainer (step 2) rather than
+// ContainerRequest.Files. ContainerRequest.Files copies at Start time, which
+// races with WaitingFor:ForExit when the container exits before Files are copied.
+// CopyFileToContainer before Start guarantees the JAR is present when execution begins.
 func (d *dockerRunner) RunValidator(ctx context.Context, req ValidatorContainerRequest) (string, error) {
 	tcReq := testcontainers.ContainerRequest{
 		Image:    req.Image,
 		Networks: req.Networks,
 		Cmd:      req.Cmd,
 		Env:      req.Env,
-		// JAR is copied at container-create time via Files — no bind mount needed.
-		Files: []testcontainers.ContainerFile{
-			{
-				HostFilePath:      req.JarHostPath,
-				ContainerFilePath: req.JarContainerPath,
-				FileMode:          0o644,
-			},
-		},
+		// No Files here: JAR is copied explicitly via CopyFileToContainer after create,
+		// before Start. This avoids the race between ContainerRequest.Files and WaitingFor.
 		WaitingFor: wait.ForExit(),
 	}
 
+	// WorkingDir is set to the container-side project root where the clone lands.
+	// This is ProjectRoot = "/work/" + Base(cloneRoot), derived in BuildContainerRequest.
+	// Using ProjectRoot (not the constant "/work") ensures Java's user.dir resolves
+	// relative paths correctly after CopyDirToContainer lands the clone at ProjectRoot.
+	workingDir := req.ProjectRoot
+	if workingDir == "" {
+		workingDir = "/work" // safe fallback; should not occur in normal usage
+	}
 	tcReq.ConfigModifier = func(c *dockercontainer.Config) {
-		c.WorkingDir = containerWorkDir
+		c.WorkingDir = workingDir
 		if runtime.GOOS == "linux" && req.User != "" {
 			c.User = req.User
 		}
 	}
 
-	// Create without starting so we can copy directories in before execution.
+	// Create without starting so we can copy files/dirs in before execution.
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: tcReq,
 		Started:          false,
@@ -204,7 +212,20 @@ func (d *dockerRunner) RunValidator(ctx context.Context, req ValidatorContainerR
 	// Terminate is safe even on a created-but-not-started container (no-op).
 	defer func() { _ = c.Terminate(ctx) }()
 
-	// Copy each CopyDir into the container before starting it.
+	// Copy the JAR into the container before starting it.
+	// Explicit copy before Start avoids the race with ContainerRequest.Files which
+	// copies at Start time and can be skipped when WaitingFor:ForExit fires first.
+	// CopyFileToContainer creates intermediate directories on the container side.
+	if req.JarHostPath != "" && req.JarContainerPath != "" {
+		if err := c.CopyFileToContainer(ctx, req.JarHostPath, req.JarContainerPath, 0o644); err != nil {
+			if ctx.Err() != nil {
+				return "", fmt.Errorf("context cancelled during JAR copy-in: %w", ctx.Err())
+			}
+			return "", fmt.Errorf("copy JAR into validator container: %w", err)
+		}
+	}
+
+	// Copy each CopyDir (e.g. cloneRoot → /work) into the container before starting.
 	for _, cd := range req.CopyDirs {
 		if err := c.CopyDirToContainer(ctx, cd.HostPath, cd.ContainerParent, 0o755); err != nil {
 			if ctx.Err() != nil {
@@ -215,6 +236,7 @@ func (d *dockerRunner) RunValidator(ctx context.Context, req ValidatorContainerR
 	}
 
 	// Start the container now that all inputs are present.
+	// WaitingFor:ForExit blocks until the JAR process exits.
 	if err := c.Start(ctx); err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("context cancelled before container start: %w", ctx.Err())
@@ -222,7 +244,7 @@ func (d *dockerRunner) RunValidator(ctx context.Context, req ValidatorContainerR
 		return "", fmt.Errorf("start validator container: %w", err)
 	}
 
-	// Capture logs.
+	// Capture logs (blocking — WaitingFor:ForExit means container has already exited).
 	var buf bytes.Buffer
 	logs, logsErr := c.Logs(ctx)
 	if logsErr != nil && ctx.Err() == nil {
@@ -242,8 +264,8 @@ func (d *dockerRunner) RunValidator(ctx context.Context, req ValidatorContainerR
 	if req.ReportContainerPath != "" && req.ReportHostPath != "" {
 		rc, copyErr := c.CopyFileFromContainer(ctx, req.ReportContainerPath)
 		if copyErr == nil {
-			defer rc.Close()
 			reportBytes, readErr := io.ReadAll(rc)
+			rc.Close()
 			if readErr == nil && len(reportBytes) > 0 {
 				if mkdirErr := os.MkdirAll(filepath.Dir(req.ReportHostPath), 0o755); mkdirErr == nil {
 					_ = os.WriteFile(req.ReportHostPath, reportBytes, 0o644)

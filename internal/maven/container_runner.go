@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -78,24 +79,50 @@ func (r *ContainerRunner) SetNetworkName(name string) {
 //   - Env["HOME"] = "/tmp" so Maven writes .m2 to /tmp instead of /root/.m2.
 //     This suppresses "mkdir: cannot create directory '/root': Permission denied"
 //     when the container runs as a non-root host UID (via --user UID:GID).
-//   - ConfigModifier: WorkingDir=/work, and --user UID:GID on Linux (non-root).
+//   - ConfigModifier: WorkingDir=cloneProjectRoot, and --user UID:GID on Linux (non-root).
 //   - Started: false — caller must CopyDirToContainer then c.Start manually.
 //
-// Directories are NOT mounted; they are copied in by the Run method after the
-// container is created (Started:false) using CopyDirToContainer.
+// CopyDirToContainer landing rule (testcontainers-go v0.42.0):
+//
+//	CopyDirToContainer(ctx, hostDir, containerParent, mode) places hostDir at
+//	path.Dir(containerParent) + "/" + filepath.Base(hostDir), NOT at containerParent.
+//
+// To land cloneRoot at "/work/<Base(cloneRoot)>", Run passes "/work/_" as containerParent.
+// To land repoCachePath at "/m2/<Base(repoCachePath)>", Run passes "/m2/_" as containerParent.
+// BuildContainerRequest computes those derived paths and uses them in the cmd and WorkingDir.
 func BuildContainerRequest(
 	image, networkName, repoCachePath string,
 	uid, gid int,
 	cloneRoot, goal string,
 	params []string,
 ) testcontainers.ContainerRequest {
+	// cloneProjectRoot is where CopyDirToContainer lands cloneRoot.
+	//
+	// CopyDirToContainer(ctx, cloneRoot, "/work/_", mode):
+	//   parent = Dir("/work/_") = "/work"   (Docker creates this via ConfigModifier.WorkingDir)
+	//   landing = "/work/" + Base(cloneRoot)
+	cloneProjectRoot := "/work/" + filepath.Base(cloneRoot)
+
+	// m2Root is where CopyDirToContainer lands repoCachePath.
+	//
+	// CopyDirToContainer(ctx, repoCachePath, "/tmp/_", mode):
+	//   parent = Dir("/tmp/_") = "/tmp"   (/tmp always exists in any container)
+	//   landing = "/tmp/" + Base(repoCachePath)
+	//
+	// When repoCachePath is empty, no copy is done; Maven resolves deps online.
+	// The placeholder value here is never used in that case.
+	m2Root := "/tmp/m2"
+	if repoCachePath != "" {
+		m2Root = "/tmp/" + filepath.Base(repoCachePath)
+	}
+
 	paramStr := strings.Join(params, " ")
 	cmd := []string{
 		"mvn",
-		"-f", "/work/pom.xml",
+		"-f", cloneProjectRoot + "/pom.xml",
 		"-B",
-		"-s", "/work/settings.xml",
-		"-Dmaven.repo.local=/m2",
+		"-s", cloneProjectRoot + "/settings.xml",
+		"-Dmaven.repo.local=" + m2Root,
 		goal,
 		"-Dparams=" + paramStr,
 	}
@@ -118,10 +145,10 @@ func BuildContainerRequest(
 		WaitingFor: wait.ForExit(),
 	}
 
-	// ConfigModifier sets the working directory to /work (so Java's user.dir is the
-	// project root, resolving relative paths correctly) and the --user flag on Linux.
+	// ConfigModifier sets the working directory to cloneProjectRoot (so Java's user.dir is
+	// the project root, resolving relative paths correctly) and the --user flag on Linux.
 	req.ConfigModifier = func(c *dockercontainer.Config) {
-		c.WorkingDir = "/work"
+		c.WorkingDir = cloneProjectRoot
 		// Set --user on Linux when not running as root.
 		if runtime.GOOS == "linux" && uid != 0 {
 			c.User = fmt.Sprintf("%d:%d", uid, gid)
@@ -189,9 +216,13 @@ func (r *ContainerRunner) Run(
 	// Terminate is safe even on a created-but-not-started container (no-op if not running).
 	defer func() { _ = c.Terminate(ctx) }()
 
-	// Copy cloneRoot contents into /work inside the container.
-	// CopyDirToContainer copies the CONTENTS of hostDirPath into containerParentPath.
-	if err := c.CopyDirToContainer(ctx, cloneRoot, "/work", 0o755); err != nil {
+	// Copy cloneRoot into the container under /work.
+	//
+	// CopyDirToContainer landing rule: Dir(containerParent) + "/" + Base(hostDir).
+	// Passing "/work/_" as containerParent → Dir("/work/_") = "/work"
+	// → clone lands at "/work/" + Base(cloneRoot) = cloneProjectRoot.
+	// This matches the path used in the cmd (-f, -s) and ConfigModifier.WorkingDir.
+	if err := c.CopyDirToContainer(ctx, cloneRoot, "/work/_", 0o755); err != nil {
 		if ctx.Err() != nil {
 			return domain.StepResult{
 				Name:     goal,
@@ -203,9 +234,13 @@ func (r *ContainerRunner) Run(
 		return domain.StepResult{}, fmt.Errorf("copy clone into maven container: %w", err)
 	}
 
-	// Copy vendored Maven repo into /m2 (optional — absent means online resolution).
+	// Copy vendored Maven repo into the container under /tmp (optional — absent means online resolution).
+	//
+	// Landing rule: CopyDirToContainer(ctx, repoCachePath, "/tmp/_", mode)
+	//   parent = Dir("/tmp/_") = "/tmp"   (/tmp always exists in any container image)
+	//   landing = "/tmp/" + Base(repoCachePath) = m2Root used in -Dmaven.repo.local.
 	if r.repoCachePath != "" {
-		if err := c.CopyDirToContainer(ctx, r.repoCachePath, "/m2", 0o755); err != nil {
+		if err := c.CopyDirToContainer(ctx, r.repoCachePath, "/tmp/_", 0o755); err != nil {
 			if ctx.Err() != nil {
 				return domain.StepResult{
 					Name:     goal,

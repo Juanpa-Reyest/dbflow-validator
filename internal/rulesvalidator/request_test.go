@@ -1,6 +1,7 @@
 package rulesvalidator_test
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -96,15 +97,20 @@ func TestBuildContainerRequest_NoBindMounts(t *testing.T) {
 }
 
 // TestBuildContainerRequest_CopyDirsContainsCloneRoot asserts the clone root is scheduled
-// for copy-in at /work via CopyDirs (replacing the old /work bind mount).
+// for copy-in via CopyDirs with the correct container parent anchor.
+//
+// CopyDirToContainer landing rule: the clone lands at Dir(ContainerParent)+"/"+Base(HostPath).
+// To land at "/work/<Base(cloneRoot)>", ContainerParent must be "/work/_" so that
+// Dir("/work/_") = "/work". The test therefore asserts ContainerParent == "/work/_".
 func TestBuildContainerRequest_CopyDirsContainsCloneRoot(t *testing.T) {
 	req := buildTestRequest(t)
+	const wantParent = "/work/_"
 	for _, cd := range req.CopyDirs {
-		if cd.HostPath == testCloneRoot && cd.ContainerParent == "/work" {
+		if cd.HostPath == testCloneRoot && cd.ContainerParent == wantParent {
 			return // found
 		}
 	}
-	t.Errorf("CopyDirs must contain {HostPath:%q, ContainerParent:\"/work\"}; got=%+v", testCloneRoot, req.CopyDirs)
+	t.Errorf("CopyDirs must contain {HostPath:%q, ContainerParent:%q}; got=%+v", testCloneRoot, wantParent, req.CopyDirs)
 }
 
 // TestBuildContainerRequest_JARFields asserts the JAR copy-in fields are set correctly.
@@ -119,9 +125,15 @@ func TestBuildContainerRequest_JARFields(t *testing.T) {
 }
 
 // TestBuildContainerRequest_ReportPaths asserts container and host report paths are set.
+//
+// Container report path: ProjectRoot + "/src/main/resources/Validator/outputReport/report/json/validation_report.json"
+// ProjectRoot = "/work/" + Base(testCloneRoot) = "/work/" + "clone" = "/work/clone"
+// (testCloneRoot = "/work-host/clone")
 func TestBuildContainerRequest_ReportPaths(t *testing.T) {
 	req := buildTestRequest(t)
-	wantContainer := "/work/src/main/resources/Validator/outputReport/report/json/validation_report.json"
+	// ProjectRoot = "/work/" + filepath.Base(testCloneRoot) = "/work/clone"
+	wantProjectRoot := "/work/" + filepath.Base(testCloneRoot)
+	wantContainer := wantProjectRoot + "/src/main/resources/Validator/outputReport/report/json/validation_report.json"
 	if req.ReportContainerPath != wantContainer {
 		t.Errorf("ReportContainerPath = %q, want %q", req.ReportContainerPath, wantContainer)
 	}
@@ -152,7 +164,9 @@ func TestBuildContainerRequest_OutputPointsToOutputReportInWork(t *testing.T) {
 	if outputVal == "" {
 		t.Fatalf("Cmd missing -output value; cmd=%v", req.Cmd)
 	}
-	want := "/work/src/main/resources/Validator/outputReport"
+	// ProjectRoot = "/work/" + Base(testCloneRoot) = "/work/clone"
+	wantProjectRoot := "/work/" + filepath.Base(testCloneRoot)
+	want := wantProjectRoot + "/src/main/resources/Validator/outputReport"
 	if outputVal != want {
 		t.Errorf("-output value = %q, want %q", outputVal, want)
 	}
