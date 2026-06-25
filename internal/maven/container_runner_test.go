@@ -6,7 +6,6 @@ import (
 	"time"
 
 	dockercontainer "github.com/moby/moby/api/types/container"
-	"github.com/moby/moby/api/types/mount"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
 	"github.com/dbflow-validator/dbflow-validator/internal/maven"
@@ -143,9 +142,10 @@ func TestMapContainerResult(t *testing.T) {
 	}
 }
 
-// extractMountsFromRequest calls the HostConfigModifier on a temporary HostConfig
-// so we can inspect what mounts the container request would configure at runtime.
-func extractMountsFromRequest(t *testing.T, cloneRoot, repoCachePath string) []mount.Mount {
+// assertNoBindMounts calls the HostConfigModifier (if any) and asserts no bind mounts
+// are configured. After the copy-in refactor, HostConfigModifier must be absent or
+// must leave hc.Mounts empty — no TypeBind mounts are ever registered.
+func assertNoBindMounts(t *testing.T, cloneRoot, repoCachePath string) {
 	t.Helper()
 	req := maven.BuildContainerRequest(
 		maven.DefaultImage,
@@ -156,82 +156,34 @@ func extractMountsFromRequest(t *testing.T, cloneRoot, repoCachePath string) []m
 		"dbflow:sync",
 		[]string{"--TAG=test"},
 	)
-	hc := &dockercontainer.HostConfig{}
-	req.HostConfigModifier(hc)
-	return hc.Mounts
-}
-
-// TestMavenContainerRequest_MountsCloneRootRW asserts that the clone root is
-// mounted as a typed bind mount (Source=cloneRoot, Target=/work, ReadOnly=false).
-// Typed mounts avoid the Windows drive-letter colon ambiguity in raw bind strings.
-func TestMavenContainerRequest_MountsCloneRootRW(t *testing.T) {
-	const cloneRoot = "/tmp/clone-test"
-	mounts := extractMountsFromRequest(t, cloneRoot, "/tmp/m2-cache")
-
-	for _, m := range mounts {
-		if m.Source == cloneRoot && m.Target == "/work" {
-			if m.ReadOnly {
-				t.Errorf("clone root mount must be read-write (ReadOnly=false)")
-			}
-			return
-		}
-	}
-	t.Errorf("Mounts must contain {Source:%q, Target:\"/work\", ReadOnly:false}; got=%+v", cloneRoot, mounts)
-}
-
-// TestMavenContainerRequest_MountsRepoCacheReadOnly asserts that the repo cache
-// is mounted read-only (Source=repoCachePath, Target=/m2, ReadOnly=true).
-func TestMavenContainerRequest_MountsRepoCacheReadOnly(t *testing.T) {
-	const cloneRoot = "/tmp/clone-test"
-	const repoCache = "/tmp/m2-cache"
-	mounts := extractMountsFromRequest(t, cloneRoot, repoCache)
-
-	for _, m := range mounts {
-		if m.Source == repoCache && m.Target == "/m2" {
-			if !m.ReadOnly {
-				t.Errorf("repo cache mount must be read-only (ReadOnly=true)")
-			}
-			return
-		}
-	}
-	t.Errorf("Mounts must contain {Source:%q, Target:\"/m2\", ReadOnly:true}; got=%+v", repoCache, mounts)
-}
-
-// TestMavenContainerRequest_NoCacheMount asserts that when repoCachePath is empty
-// no /m2 mount is added.
-func TestMavenContainerRequest_NoCacheMount(t *testing.T) {
-	mounts := extractMountsFromRequest(t, "/tmp/clone-test", "")
-
-	for _, m := range mounts {
-		if m.Target == "/m2" {
-			t.Errorf("no /m2 mount expected when repoCachePath is empty; got=%+v", mounts)
-			return
+	if req.HostConfigModifier != nil {
+		hc := &dockercontainer.HostConfig{}
+		req.HostConfigModifier(hc)
+		if len(hc.Mounts) > 0 {
+			t.Errorf("HostConfigModifier must not add any bind mounts; got %+v", hc.Mounts)
 		}
 	}
 }
 
-// TestMavenContainerRequest_WindowsPathPassedThrough is the regression guard for
-// the Windows bind-mount bug. A Windows-style source path must be preserved
-// unchanged as the mount Source — never split on its drive colon.
+// TestMavenContainerRequest_NoBindMounts asserts that BuildContainerRequest no longer
+// configures host bind mounts. Copy-in is handled via CopyDirToContainer after create.
+func TestMavenContainerRequest_NoBindMounts(t *testing.T) {
+	assertNoBindMounts(t, "/tmp/clone-test", "/tmp/m2-cache")
+}
+
+// TestMavenContainerRequest_NoBindMounts_NoCacheAlsoClean asserts no mounts even when
+// repoCachePath is empty.
+func TestMavenContainerRequest_NoBindMounts_NoCacheAlsoClean(t *testing.T) {
+	assertNoBindMounts(t, "/tmp/clone-test", "")
+}
+
+// TestMavenContainerRequest_WindowsPathPassedThrough is the regression guard: Windows-style
+// paths must not cause any bind-string parse errors. After the copy-in refactor, paths
+// are passed to CopyDirToContainer (not hc.Mounts), so drive-letter colons are safe.
+// We assert the request can be built without panic and no bind mounts appear.
 func TestMavenContainerRequest_WindowsPathPassedThrough(t *testing.T) {
 	winCloneRoot := `E:\Users\1048168\AppData\Local\Temp\dbflow-clone-611297184`
 	winRepoCache := `C:\Users\1048168\.m2`
-	mounts := extractMountsFromRequest(t, winCloneRoot, winRepoCache)
-
-	foundClone := false
-	foundCache := false
-	for _, m := range mounts {
-		if m.Source == winCloneRoot {
-			foundClone = true
-		}
-		if m.Source == winRepoCache {
-			foundCache = true
-		}
-	}
-	if !foundClone {
-		t.Errorf("Windows clone root %q must appear as mount Source unchanged; mounts=%+v", winCloneRoot, mounts)
-	}
-	if !foundCache {
-		t.Errorf("Windows repo cache %q must appear as mount Source unchanged; mounts=%+v", winRepoCache, mounts)
-	}
+	// Must not panic.
+	assertNoBindMounts(t, winCloneRoot, winRepoCache)
 }
