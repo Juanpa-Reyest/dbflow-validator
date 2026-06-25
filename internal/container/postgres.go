@@ -13,6 +13,17 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+// postgresStartAttempts is the number of times Start will retry a transient
+// Docker failure (e.g. "500 Internal Server Error" on container create/start).
+const postgresStartAttempts = 3
+
+// postgresStartBackoff is the sleep between postgres start retry attempts.
+const postgresStartBackoff = time.Second
+
+// postgresStarterFn is the injectable seam type for container start.
+// It matches the signature of startOnce and is used in unit tests.
+type postgresStarterFn func(ctx context.Context, networkName string) (domain.ContainerCoords, error)
+
 const (
 	postgresImage = "postgres:17.4"
 	throwawayDB   = "validatordb"
@@ -40,19 +51,10 @@ func NewPostgresProvider() *PostgresProvider {
 // Maven containers connect to this alias at port 5432.
 const postgresNetworkAlias = "postgres"
 
-// Start launches an ephemeral postgres:17.4 container on a random free host port
-// and waits until Postgres logs that it is ready to accept connections.
-//
-// networkName is the Docker network to join; pass "" for host-only networking.
-// When non-empty, the container joins that user-defined Docker network with alias
-// "postgres" so Maven containers running in the same network can reach Postgres at
-// postgres:5432. The returned ContainerCoords will have both Host:Port (admin/host
-// path) and AliasHost:AliasPort (network path) set.
-//
-// Role creation (lb_<schema>, GRANT-target roles) is NOT done here — it is done
-// by the orchestrator after schema extraction from the archetype DDL, so the set
-// of roles is determined from the actual repo contents, not hardcoded.
-func (p *PostgresProvider) Start(ctx context.Context, networkName string) (domain.ContainerCoords, error) {
+// startOnce performs a single attempt to launch the Postgres container.
+// On failure it terminates any partially-created container (orphan cleanup) before
+// returning the error, so callers that retry do not accumulate dangling containers.
+func (p *PostgresProvider) startOnce(ctx context.Context, networkName string) (domain.ContainerCoords, error) {
 	req := testcontainers.ContainerRequest{
 		Image:        postgresImage,
 		ExposedPorts: []string{"5432/tcp"},
@@ -81,6 +83,11 @@ func (p *PostgresProvider) Start(ctx context.Context, networkName string) (domai
 		Started:          true,
 	})
 	if err != nil {
+		// testcontainers-go may return a non-nil container handle even on error;
+		// terminate it to avoid orphaned containers before the next retry.
+		if c != nil {
+			_ = c.Terminate(ctx)
+		}
 		return domain.ContainerCoords{}, fmt.Errorf("%w: %v", domain.ErrContainerFailed, err)
 	}
 
@@ -113,6 +120,46 @@ func (p *PostgresProvider) Start(ctx context.Context, networkName string) (domai
 	}
 
 	return coords, nil
+}
+
+// StartWithStarter launches the Postgres container using the provided starter function,
+// retrying up to postgresStartAttempts times on transient errors.
+//
+// starter is an injectable seam used in unit tests. Production callers must pass
+// p.startOnce (which uses real Docker). backoff controls the sleep between retries;
+// production code passes postgresStartBackoff and tests pass 0 for fast execution.
+func (p *PostgresProvider) StartWithStarter(ctx context.Context, networkName string, starter postgresStarterFn, backoff time.Duration) (domain.ContainerCoords, error) {
+	var coords domain.ContainerCoords
+	err := RetryDo(ctx, postgresStartAttempts, backoff, func() error {
+		var e error
+		coords, e = starter(ctx, networkName)
+		return e
+	})
+	if err != nil {
+		return domain.ContainerCoords{}, err
+	}
+	return coords, nil
+}
+
+// Start launches an ephemeral postgres:17.4 container on a random free host port
+// and waits until Postgres logs that it is ready to accept connections.
+//
+// networkName is the Docker network to join; pass "" for host-only networking.
+// When non-empty, the container joins that user-defined Docker network with alias
+// "postgres" so Maven containers running in the same network can reach Postgres at
+// postgres:5432. The returned ContainerCoords will have both Host:Port (admin/host
+// path) and AliasHost:AliasPort (network path) set.
+//
+// Role creation (lb_<schema>, GRANT-target roles) is NOT done here — it is done
+// by the orchestrator after schema extraction from the archetype DDL, so the set
+// of roles is determined from the actual repo contents, not hardcoded.
+//
+// Transient Docker failures (e.g. "500 Internal Server Error" on container
+// create/start) are retried up to postgresStartAttempts times with
+// postgresStartBackoff between attempts. A partially-created container from a
+// failed attempt is terminated before the next retry (orphan cleanup).
+func (p *PostgresProvider) Start(ctx context.Context, networkName string) (domain.ContainerCoords, error) {
+	return p.StartWithStarter(ctx, networkName, p.startOnce, postgresStartBackoff)
 }
 
 // Stop terminates and removes the ephemeral container.
