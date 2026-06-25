@@ -179,6 +179,19 @@ func TestResolveValidatorJarWith_Success_ReturnsPath(t *testing.T) {
 	}
 }
 
+// TestVersion_Is013 asserts that the VERSION file in the repo root contains exactly
+// "0.1.3" — the release version for the windows-zero-config change.
+func TestVersion_Is013(t *testing.T) {
+	data, err := os.ReadFile("../../VERSION")
+	if err != nil {
+		t.Fatalf("read VERSION file: %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	if got != "0.1.3" {
+		t.Errorf("VERSION = %q, want \"0.1.3\"", got)
+	}
+}
+
 // TestVersion_Flag verifies that --version and -v print the version string
 // and exit with code 0 without attempting any network or Docker operations.
 func TestVersion_Flag(t *testing.T) {
