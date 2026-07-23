@@ -49,11 +49,11 @@ const usageText = `dbflow-validator — validate a PostgreSQL Maven DB archetype
 
 Usage:
   dbflow-validator --repo-url <url> [flags]
-  dbflow-validator              (interactive TTY: prompts for URL and token)
+  dbflow-validator              (interactive TTY: prompts for URL, base branch, and token)
 
 Flags:
   --repo-url      string   Git repository URL to clone and validate (required, or interactive)
-  --base-branch   string   Branch to validate (default: integration)
+  --base-branch   string   Branch to validate (required, or interactive)
   --sql-input     string   Path to local SQLInput directory (default: ./src/main/resources/SQLInput)
   --output-format string   Output format: console or json (default: console)
   --output-file   string   Path to write JSON output (optional)
@@ -84,7 +84,7 @@ Examples:
     --repo-url https://github.com/org/db-artifacts-myproject.git \
     --keep-workspace
 
-  # Interactive (TTY): prompts for URL and token when not provided:
+  # Interactive (TTY): prompts for URL, base branch, and token when not provided:
   dbflow-validator
 
 Run artifacts:

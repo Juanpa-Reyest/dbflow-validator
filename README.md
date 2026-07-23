@@ -90,11 +90,12 @@ There's no setup wizard: you run the file, it asks for your repo, and it validat
 
 ## What it asks you
 
-When you run it with no options, it prompts for the repository URL.
+When you run it with no options, it prompts for the repository URL and the base branch.
 If the URL is HTTPS it also prompts for an access token:
 
 ```
 Repository URL:        https://github.com/your-org/your-archetype.git
+Base branch:           integration
 Git access token (hidden):
 ```
 
@@ -181,7 +182,7 @@ Run `dbflow-validator --help` for the full list any time.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--repo-url` | — | Repository to clone and validate (asked interactively if omitted) |
-| `--base-branch` | `integration` | Branch to validate |
+| `--base-branch` | — | Branch to validate (asked interactively if omitted; required when run non-interactively) |
 | `--sql-input` | `./src/main/resources/SQLInput` | Path to local SQLInput directory |
 | `--output-format` | `console` | `console` or `json` |
 | `--output-file` | — | Write the JSON result to this path |

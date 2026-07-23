@@ -20,7 +20,6 @@ import (
 
 const (
 	tokenEnvVar      = "DBFLOW_GIT_TOKEN"
-	defaultBranch    = "integration"
 	defaultFormat    = "console"
 	defaultLogLvl    = "info"
 	defaultSQLInput  = "src/main/resources/SQLInput"
@@ -60,6 +59,8 @@ func (c Config) String() string {
 type PromptReader interface {
 	// ReadRepoURL prompts the user for the repository URL (visible input).
 	ReadRepoURL() (string, error)
+	// ReadBaseBranch prompts the user for the base branch to validate (visible input).
+	ReadBaseBranch() (string, error)
 	// ReadToken prompts the user for the git access token (no-echo input).
 	// The returned Secret wraps the raw token immediately; the raw string is never stored.
 	ReadToken() (domain.Secret, error)
@@ -92,6 +93,23 @@ func (r *DefaultPromptReader) ReadRepoURL() (string, error) {
 		return "", fmt.Errorf("repository URL must not be empty")
 	}
 	return url, nil
+}
+
+// ReadBaseBranch prints a prompt to stderr and reads a line from stdin (visible).
+func (r *DefaultPromptReader) ReadBaseBranch() (string, error) {
+	fmt.Fprint(os.Stderr, "Base branch: ")
+	scanner := bufio.NewScanner(r.stdin)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return "", fmt.Errorf("read base branch: %w", err)
+		}
+		return "", fmt.Errorf("read base branch: unexpected EOF")
+	}
+	branch := sanitizeBranch(scanner.Text())
+	if branch == "" {
+		return "", fmt.Errorf("base branch must not be empty")
+	}
+	return branch, nil
 }
 
 // ReadToken prints a prompt to stderr and reads the token from stdin with echo suppressed.
@@ -180,7 +198,7 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 	)
 
 	fs.StringVar(&repoURL, "repo-url", "", "Repository URL to clone and validate")
-	fs.StringVar(&baseBranch, "base-branch", defaultBranch, "Branch to validate (default: integration)")
+	fs.StringVar(&baseBranch, "base-branch", "", "Branch to validate (required non-interactively; prompted when run interactively)")
 	fs.StringVar(&sqlInputPath, "sql-input", "", "Path to local SQLInput directory (default: ./src/main/resources/SQLInput)")
 	fs.StringVar(&outputFormat, "output-format", defaultFormat, "Output format: console or json (default: console)")
 	fs.StringVar(&outputFile, "output-file", "", "Path to write JSON output (optional)")
@@ -209,6 +227,21 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 			return Config{}, fmt.Errorf("interactive prompt for repo-url: %w", err)
 		}
 		repoURL = url
+	}
+
+	// Resolve base branch: flag > prompt.
+	// Defensively sanitize the flag value too — shell completion or copy-paste
+	// may inject ANSI sequences even in non-interactive mode.
+	baseBranch = sanitizeBranch(baseBranch)
+	if baseBranch == "" {
+		if prompter == nil {
+			return Config{}, fmt.Errorf("--base-branch is required (or run interactively with a TTY)")
+		}
+		branch, err := prompter.ReadBaseBranch()
+		if err != nil {
+			return Config{}, fmt.Errorf("interactive prompt for base-branch: %w", err)
+		}
+		baseBranch = branch
 	}
 
 	// Resolve token: env > prompt.
