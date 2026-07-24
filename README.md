@@ -90,11 +90,12 @@ There's no setup wizard: you run the file, it asks for your repo, and it validat
 
 ## What it asks you
 
-When you run it with no options, it prompts for the repository URL.
+When you run it with no options, it prompts for the repository URL and the base branch.
 If the URL is HTTPS it also prompts for an access token:
 
 ```
 Repository URL:        https://github.com/your-org/your-archetype.git
+Base branch:           integration
 Git access token (hidden):
 ```
 
@@ -181,19 +182,21 @@ Run `dbflow-validator --help` for the full list any time.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--repo-url` | — | Repository to clone and validate (asked interactively if omitted) |
-| `--base-branch` | `integration` | Branch to validate |
+| `--base-branch` | — | Branch to validate (asked interactively if omitted; required when run non-interactively) |
 | `--sql-input` | `./src/main/resources/SQLInput` | Path to local SQLInput directory |
 | `--output-format` | `console` | `console` or `json` |
 | `--output-file` | — | Write the JSON result to this path |
 | `--log-level` | `info` | `debug`, `info`, `warn`, `error` |
 | `--output-dir` | `./dbflow-validator-runs` | Directory for per-run artifact subdirectories |
 | `--keep-workspace` | `false` | Retain the ephemeral clone under `<run>/workspace/` even on a PASSED run |
+| `--postgres-image` | `postgres:17.4` | Ephemeral Postgres container image. Override to supply an image with extra extensions (e.g. `pg_partman`). |
 | `--version`, `-v` | — | Print the version and exit |
 | `--help`, `-h` | — | Print help and exit |
 
 | Environment variable | Description |
 |----------------------|-------------|
 | `DBFLOW_GIT_TOKEN` | Git access token for HTTPS URLs (instead of the interactive prompt; never logged). Not needed for SSH URLs. |
+| `DBFLOW_POSTGRES_IMAGE` | Ephemeral Postgres container image (alternative to `--postgres-image`). Lets you supply an image with extra extensions (e.g. `pg_partman`). |
 
 ### Run artifacts
 

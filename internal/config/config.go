@@ -19,18 +19,19 @@ import (
 )
 
 const (
-	tokenEnvVar      = "DBFLOW_GIT_TOKEN"
-	defaultBranch    = "integration"
-	defaultFormat    = "console"
-	defaultLogLvl    = "info"
-	defaultSQLInput  = "src/main/resources/SQLInput"
-	defaultOutputDir = "dbflow-validator-runs"
+	tokenEnvVar          = "DBFLOW_GIT_TOKEN"
+	postgresImageEnvVar  = "DBFLOW_POSTGRES_IMAGE"
+	defaultFormat        = "console"
+	defaultLogLvl        = "info"
+	defaultSQLInput      = "src/main/resources/SQLInput"
+	defaultOutputDir     = "dbflow-validator-runs"
+	defaultPostgresImage = "postgres:17.4"
 )
 
 // Config holds all resolved inputs for a validation run.
 type Config struct {
-	RepoURL      string
-	BaseBranch   string
+	RepoURL    string
+	BaseBranch string
 	// SQLInputPath is the absolute path to the developer's local SQLInput directory.
 	// Resolved from the --sql-input flag (or its default) at parse time using os.Getwd().
 	SQLInputPath string
@@ -46,13 +47,17 @@ type Config struct {
 	// KeepWorkspace, when true, retains the ephemeral clone under <run>/workspace/
 	// even on a PASSED run. Normally the clone is removed on success.
 	KeepWorkspace bool
+	// PostgresImage is the ephemeral Postgres container image to launch. Defaults to
+	// defaultPostgresImage; override it to supply an image with extra extensions
+	// (e.g. pg_partman). Resolved from --postgres-image or DBFLOW_POSTGRES_IMAGE.
+	PostgresImage string
 }
 
 // String returns a human-readable representation that NEVER includes the token value.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{RepoURL:%q BaseBranch:%q SQLInputPath:%q OutputFormat:%q OutputFile:%q LogLevel:%q Token:%s OutputDir:%q KeepWorkspace:%v}",
-		c.RepoURL, c.BaseBranch, c.SQLInputPath, c.OutputFormat, c.OutputFile, c.LogLevel, c.Token, c.OutputDir, c.KeepWorkspace,
+		"Config{RepoURL:%q BaseBranch:%q SQLInputPath:%q OutputFormat:%q OutputFile:%q LogLevel:%q Token:%s OutputDir:%q KeepWorkspace:%v PostgresImage:%q}",
+		c.RepoURL, c.BaseBranch, c.SQLInputPath, c.OutputFormat, c.OutputFile, c.LogLevel, c.Token, c.OutputDir, c.KeepWorkspace, c.PostgresImage,
 	)
 }
 
@@ -60,6 +65,8 @@ func (c Config) String() string {
 type PromptReader interface {
 	// ReadRepoURL prompts the user for the repository URL (visible input).
 	ReadRepoURL() (string, error)
+	// ReadBaseBranch prompts the user for the base branch to validate (visible input).
+	ReadBaseBranch() (string, error)
 	// ReadToken prompts the user for the git access token (no-echo input).
 	// The returned Secret wraps the raw token immediately; the raw string is never stored.
 	ReadToken() (domain.Secret, error)
@@ -92,6 +99,23 @@ func (r *DefaultPromptReader) ReadRepoURL() (string, error) {
 		return "", fmt.Errorf("repository URL must not be empty")
 	}
 	return url, nil
+}
+
+// ReadBaseBranch prints a prompt to stderr and reads a line from stdin (visible).
+func (r *DefaultPromptReader) ReadBaseBranch() (string, error) {
+	fmt.Fprint(os.Stderr, "Base branch: ")
+	scanner := bufio.NewScanner(r.stdin)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return "", fmt.Errorf("read base branch: %w", err)
+		}
+		return "", fmt.Errorf("read base branch: unexpected EOF")
+	}
+	branch := sanitizeBranch(scanner.Text())
+	if branch == "" {
+		return "", fmt.Errorf("base branch must not be empty")
+	}
+	return branch, nil
 }
 
 // ReadToken prints a prompt to stderr and reads the token from stdin with echo suppressed.
@@ -177,16 +201,18 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 		logLevel      string
 		outputDir     string
 		keepWorkspace bool
+		postgresImage string
 	)
 
 	fs.StringVar(&repoURL, "repo-url", "", "Repository URL to clone and validate")
-	fs.StringVar(&baseBranch, "base-branch", defaultBranch, "Branch to validate (default: integration)")
+	fs.StringVar(&baseBranch, "base-branch", "", "Branch to validate (required non-interactively; prompted when run interactively)")
 	fs.StringVar(&sqlInputPath, "sql-input", "", "Path to local SQLInput directory (default: ./src/main/resources/SQLInput)")
 	fs.StringVar(&outputFormat, "output-format", defaultFormat, "Output format: console or json (default: console)")
 	fs.StringVar(&outputFile, "output-file", "", "Path to write JSON output (optional)")
 	fs.StringVar(&logLevel, "log-level", defaultLogLvl, "Log level: debug, info, warn, error (default: info)")
 	fs.StringVar(&outputDir, "output-dir", "", "Directory for per-run artifact subdirectories (default: ./dbflow-validator-runs)")
 	fs.BoolVar(&keepWorkspace, "keep-workspace", false, "Retain the ephemeral clone under <run>/workspace/ even on a PASSED run")
+	fs.StringVar(&postgresImage, "postgres-image", defaultPostgresImage, "Ephemeral Postgres container image (default: postgres:17.4; override for extra extensions such as pg_partman)")
 
 	// Discard usage output; callers handle errors themselves.
 	var usageBuf strings.Builder
@@ -195,6 +221,10 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 	if err := fs.Parse(args); err != nil {
 		return Config{}, fmt.Errorf("flag parse: %w", err)
 	}
+
+	// Track which flags were explicitly provided so env vars only fill in defaults.
+	flagSet := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { flagSet[f.Name] = true })
 
 	// Resolve repo URL: flag > prompt.
 	// Defensively sanitize the flag value too — shell completion or copy-paste
@@ -209,6 +239,21 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 			return Config{}, fmt.Errorf("interactive prompt for repo-url: %w", err)
 		}
 		repoURL = url
+	}
+
+	// Resolve base branch: flag > prompt.
+	// Defensively sanitize the flag value too — shell completion or copy-paste
+	// may inject ANSI sequences even in non-interactive mode.
+	baseBranch = sanitizeBranch(baseBranch)
+	if baseBranch == "" {
+		if prompter == nil {
+			return Config{}, fmt.Errorf("--base-branch is required (or run interactively with a TTY)")
+		}
+		branch, err := prompter.ReadBaseBranch()
+		if err != nil {
+			return Config{}, fmt.Errorf("interactive prompt for base-branch: %w", err)
+		}
+		baseBranch = branch
 	}
 
 	// Resolve token: env > prompt.
@@ -263,6 +308,19 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 		resolvedOutputDir = filepath.Join(cwd, resolvedOutputDir)
 	}
 
+	// Resolve Postgres image: explicit flag > env > default.
+	// The flag defaults to defaultPostgresImage, so DBFLOW_POSTGRES_IMAGE is only
+	// consulted when the flag was left at its default (not explicitly provided).
+	postgresImage = sanitizeImage(postgresImage)
+	if !flagSet["postgres-image"] {
+		if envImage := sanitizeImage(env(postgresImageEnvVar)); envImage != "" {
+			postgresImage = envImage
+		}
+	}
+	if postgresImage == "" {
+		postgresImage = defaultPostgresImage
+	}
+
 	return Config{
 		RepoURL:       repoURL,
 		BaseBranch:    baseBranch,
@@ -273,5 +331,6 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 		Token:         token,
 		OutputDir:     resolvedOutputDir,
 		KeepWorkspace: keepWorkspace,
+		PostgresImage: postgresImage,
 	}, nil
 }

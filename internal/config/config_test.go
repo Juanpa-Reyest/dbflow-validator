@@ -11,15 +11,20 @@ import (
 
 // mockPromptReader implements config.PromptReader for testing.
 type mockPromptReader struct {
-	url              string
-	token            string
-	urlErr           error
-	tokenErr         error
+	url               string
+	branch            string
+	token             string
+	urlErr            error
+	branchErr         error
+	tokenErr          error
 	tokenPromptCalled bool
 }
 
 func (m *mockPromptReader) ReadRepoURL() (string, error) {
 	return m.url, m.urlErr
+}
+func (m *mockPromptReader) ReadBaseBranch() (string, error) {
+	return m.branch, m.branchErr
 }
 func (m *mockPromptReader) ReadToken() (domain.Secret, error) {
 	m.tokenPromptCalled = true
@@ -81,24 +86,30 @@ func TestResolve(t *testing.T) {
 		},
 		{
 			name:    "missing DBFLOW_GIT_TOKEN with no prompter returns error",
-			args:    []string{"--repo-url", "https://host/repo.git"},
+			args:    []string{"--repo-url", "https://host/repo.git", "--base-branch", "main"},
 			env:     map[string]string{},
 			wantErr: true,
 		},
 		{
-			name: "default base-branch is integration",
-			args: []string{"--repo-url", "https://host/repo.git"},
+			name:    "missing --base-branch non-interactively returns error",
+			args:    []string{"--repo-url", "https://host/repo.git"},
+			env:     map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			wantErr: true,
+		},
+		{
+			name: "explicit --base-branch flag is respected",
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "develop"},
 			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
-				if cfg.BaseBranch != "integration" {
-					t.Errorf("BaseBranch: got %q, want %q", cfg.BaseBranch, "integration")
+				if cfg.BaseBranch != "develop" {
+					t.Errorf("BaseBranch: got %q, want %q", cfg.BaseBranch, "develop")
 				}
 			},
 		},
 		{
 			name: "default output-format is console",
-			args: []string{"--repo-url", "https://host/repo.git"},
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main"},
 			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
@@ -109,7 +120,7 @@ func TestResolve(t *testing.T) {
 		},
 		{
 			name: "default log-level is info",
-			args: []string{"--repo-url", "https://host/repo.git"},
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main"},
 			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
@@ -149,11 +160,14 @@ func TestResolveWithPrompter(t *testing.T) {
 			name:     "no repo-url and no token - prompter provides both",
 			args:     []string{},
 			env:      map[string]string{},
-			prompter: &mockPromptReader{url: "https://prompt.repo/repo.git", token: "prompted-token"},
+			prompter: &mockPromptReader{url: "https://prompt.repo/repo.git", branch: "prompted-branch", token: "prompted-token"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
 				if cfg.RepoURL != "https://prompt.repo/repo.git" {
 					t.Errorf("RepoURL from prompt: got %q", cfg.RepoURL)
+				}
+				if cfg.BaseBranch != "prompted-branch" {
+					t.Errorf("BaseBranch from prompt: got %q", cfg.BaseBranch)
 				}
 				repr := cfg.String()
 				if strings.Contains(repr, "prompted-token") {
@@ -166,8 +180,9 @@ func TestResolveWithPrompter(t *testing.T) {
 			args: []string{"--repo-url", "https://flag.repo/repo.git"},
 			env:  map[string]string{},
 			prompter: &mockPromptReader{
-				url:   "https://prompt.repo/repo.git",
-				token: "tok",
+				url:    "https://prompt.repo/repo.git",
+				branch: "prompt-branch",
+				token:  "tok",
 			},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
@@ -181,8 +196,9 @@ func TestResolveWithPrompter(t *testing.T) {
 			args: []string{},
 			env:  map[string]string{"DBFLOW_GIT_TOKEN": "env-token"},
 			prompter: &mockPromptReader{
-				url:   "https://prompt.repo/repo.git",
-				token: "prompt-token",
+				url:    "https://prompt.repo/repo.git",
+				branch: "prompt-branch",
+				token:  "prompt-token",
 			},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
@@ -194,6 +210,52 @@ func TestResolveWithPrompter(t *testing.T) {
 			},
 		},
 		{
+			name: "base-branch flag wins over prompt (flag > prompt precedence)",
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "feature/x"},
+			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			prompter: &mockPromptReader{
+				branch: "prompt-branch-should-not-be-used",
+				token:  "tok",
+			},
+			check: func(t *testing.T, cfg config.Config) {
+				t.Helper()
+				if cfg.BaseBranch != "feature/x" {
+					t.Errorf("BaseBranch: flag should win, got %q", cfg.BaseBranch)
+				}
+			},
+		},
+		{
+			name: "base-branch prompted when flag empty and prompter present",
+			args: []string{"--repo-url", "https://host/repo.git"},
+			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			prompter: &mockPromptReader{
+				branch: "prompted-branch",
+				token:  "tok",
+			},
+			check: func(t *testing.T, cfg config.Config) {
+				t.Helper()
+				if cfg.BaseBranch != "prompted-branch" {
+					t.Errorf("BaseBranch from prompt: got %q, want %q", cfg.BaseBranch, "prompted-branch")
+				}
+			},
+		},
+		{
+			name:        "base-branch empty and prompter nil returns error (non-TTY path)",
+			args:        []string{"--repo-url", "https://host/repo.git"},
+			env:         map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			prompter:    nil,
+			wantErr:     true,
+			errContains: "base-branch",
+		},
+		{
+			name:        "whitespace-only base-branch flag is rejected (sanitized to empty)",
+			args:        []string{"--repo-url", "https://host/repo.git", "--base-branch", "   "},
+			env:         map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			prompter:    nil,
+			wantErr:     true,
+			errContains: "base-branch",
+		},
+		{
 			name:        "no repo-url and no prompter - returns error (non-TTY path)",
 			args:        []string{},
 			env:         map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
@@ -202,10 +264,10 @@ func TestResolveWithPrompter(t *testing.T) {
 			errContains: "repo-url",
 		},
 		{
-			name: "--sql-input omitted defaults to absolute cwd/src/main/resources/SQLInput",
-			args: []string{"--repo-url", "https://host/repo.git"},
-			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
-			prompter: &mockPromptReader{},
+			name:     "--sql-input omitted defaults to absolute cwd/src/main/resources/SQLInput",
+			args:     []string{"--repo-url", "https://host/repo.git"},
+			env:      map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			prompter: &mockPromptReader{branch: "main"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
 				if !filepath.IsAbs(cfg.SQLInputPath) {
@@ -217,10 +279,10 @@ func TestResolveWithPrompter(t *testing.T) {
 			},
 		},
 		{
-			name: "--sql-input explicit path used as-is",
-			args: []string{"--repo-url", "https://host/repo.git", "--sql-input", "/custom/SQLInput"},
-			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
-			prompter: &mockPromptReader{},
+			name:     "--sql-input explicit path used as-is",
+			args:     []string{"--repo-url", "https://host/repo.git", "--sql-input", "/custom/SQLInput"},
+			env:      map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			prompter: &mockPromptReader{branch: "main"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
 				if cfg.SQLInputPath != "/custom/SQLInput" {
@@ -263,7 +325,7 @@ func TestResolve_OutputDirAndKeepWorkspace(t *testing.T) {
 	}{
 		{
 			name: "--output-dir default is dbflow-validator-runs (relative to cwd)",
-			args: []string{"--repo-url", "https://host/repo.git"},
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
 				if !filepath.IsAbs(cfg.OutputDir) {
@@ -276,7 +338,7 @@ func TestResolve_OutputDirAndKeepWorkspace(t *testing.T) {
 		},
 		{
 			name: "--output-dir explicit absolute value",
-			args: []string{"--repo-url", "https://host/repo.git", "--output-dir", "/tmp/my-runs"},
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main", "--output-dir", "/tmp/my-runs"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
 				if cfg.OutputDir != "/tmp/my-runs" {
@@ -286,7 +348,7 @@ func TestResolve_OutputDirAndKeepWorkspace(t *testing.T) {
 		},
 		{
 			name: "--keep-workspace default is false",
-			args: []string{"--repo-url", "https://host/repo.git"},
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
 				if cfg.KeepWorkspace {
@@ -296,7 +358,7 @@ func TestResolve_OutputDirAndKeepWorkspace(t *testing.T) {
 		},
 		{
 			name: "--keep-workspace flag sets to true",
-			args: []string{"--repo-url", "https://host/repo.git", "--keep-workspace"},
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main", "--keep-workspace"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
 				if !cfg.KeepWorkspace {
@@ -306,7 +368,7 @@ func TestResolve_OutputDirAndKeepWorkspace(t *testing.T) {
 		},
 		{
 			name: "OutputDir and KeepWorkspace do not appear as secrets in String()",
-			args: []string{"--repo-url", "https://host/repo.git", "--output-dir", "/tmp/runs", "--keep-workspace"},
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main", "--output-dir", "/tmp/runs", "--keep-workspace"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
 				repr := cfg.String()
@@ -334,6 +396,58 @@ func TestResolve_OutputDirAndKeepWorkspace(t *testing.T) {
 				t.Fatalf("Resolve() unexpected error: %v", err)
 			}
 			tt.check(t, cfg)
+		})
+	}
+}
+
+// TestResolve_PostgresImage verifies the --postgres-image flag and the
+// DBFLOW_POSTGRES_IMAGE env var resolve with precedence flag > env > default.
+func TestResolve_PostgresImage(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "default is postgres:17.4 when neither flag nor env set",
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main"},
+			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			want: "postgres:17.4",
+		},
+		{
+			name: "--postgres-image flag is respected",
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main", "--postgres-image", "custom:tag"},
+			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			want: "custom:tag",
+		},
+		{
+			name: "DBFLOW_POSTGRES_IMAGE env is respected when flag omitted",
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main"},
+			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok", "DBFLOW_POSTGRES_IMAGE": "envregistry/pg:17"},
+			want: "envregistry/pg:17",
+		},
+		{
+			name: "explicit flag overrides env",
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main", "--postgres-image", "flag:wins"},
+			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok", "DBFLOW_POSTGRES_IMAGE": "env:loses"},
+			want: "flag:wins",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := func(key string) string { return tt.env[key] }
+			cfg, err := config.ResolveWithPrompter(tt.args, env, nil)
+			if err != nil {
+				t.Fatalf("ResolveWithPrompter() unexpected error: %v", err)
+			}
+			if cfg.PostgresImage != tt.want {
+				t.Errorf("PostgresImage: got %q, want %q", cfg.PostgresImage, tt.want)
+			}
+			if !strings.Contains(cfg.String(), "PostgresImage") {
+				t.Errorf("String() should contain PostgresImage, got %q", cfg.String())
+			}
 		})
 	}
 }
@@ -418,7 +532,7 @@ func TestResolveSSH(t *testing.T) {
 
 	t.Run("HTTPS URL without token and no prompter: still errors (HTTPS behavior unchanged)", func(t *testing.T) {
 		_, err := config.ResolveWithPrompter(
-			[]string{"--repo-url", "https://github.com/org/repo.git"},
+			[]string{"--repo-url", "https://github.com/org/repo.git", "--base-branch", "main"},
 			func(string) string { return "" },
 			nil, // no prompter — non-TTY
 		)
@@ -432,7 +546,7 @@ func TestResolveSSH(t *testing.T) {
 
 	t.Run("HTTPS URL with no token no prompter: error unchanged", func(t *testing.T) {
 		_, err := config.ResolveWithPrompter(
-			[]string{"--repo-url", "https://github.com/org/repo.git"},
+			[]string{"--repo-url", "https://github.com/org/repo.git", "--base-branch", "main"},
 			func(string) string { return "" },
 			nil,
 		)

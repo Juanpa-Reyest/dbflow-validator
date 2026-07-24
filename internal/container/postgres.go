@@ -25,26 +25,42 @@ const postgresStartBackoff = time.Second
 type postgresStarterFn func(ctx context.Context, networkName string) (domain.ContainerCoords, error)
 
 const (
-	postgresImage = "postgres:17.4"
-	throwawayDB   = "validatordb"
-	throwawayUser = "validator"
-	throwawayPass = "v4lid4t0r_pass"
+	// defaultPostgresImage is the fallback image used when no image is configured.
+	// Keeping it as the default preserves byte-identical behavior for existing users.
+	defaultPostgresImage = "postgres:17.4"
+	throwawayDB          = "validatordb"
+	throwawayUser        = "validator"
+	throwawayPass        = "v4lid4t0r_pass"
 )
 
-// PostgresProvider implements domain.ContainerProvider for an ephemeral postgres:17.4 container.
+// PostgresProvider implements domain.ContainerProvider for an ephemeral Postgres container.
 // testcontainers-go handles Ryuk-based cleanup automatically.
 //
 // The Docker network name is provided at Start time (not at construction), so the
 // provider can be constructed before the network exists and the network is created lazily.
+//
+// The container image is provided at construction so areas needing extra extensions
+// (e.g. pg_partman) can point at a custom image; it defaults to defaultPostgresImage.
 type PostgresProvider struct {
 	container testcontainers.Container
+	image     string
 }
 
-// NewPostgresProvider returns a PostgresProvider ready to Start.
+// NewPostgresProvider returns a PostgresProvider ready to Start using the given image.
+// An empty image falls back to defaultPostgresImage so existing callers stay unaffected.
 // The Docker network name is passed to Start when the network exists; pass "" to Start
 // for host-only networking (no Docker network alias).
-func NewPostgresProvider() *PostgresProvider {
-	return &PostgresProvider{}
+func NewPostgresProvider(image string) *PostgresProvider {
+	if image == "" {
+		image = defaultPostgresImage
+	}
+	return &PostgresProvider{image: image}
+}
+
+// Image returns the container image this provider launches. Used by the
+// container-start trace so it reflects the actual (possibly custom) image.
+func (p *PostgresProvider) Image() string {
+	return p.image
 }
 
 // postgresNetworkAlias is the in-network alias for the Postgres container.
@@ -56,7 +72,7 @@ const postgresNetworkAlias = "postgres"
 // returning the error, so callers that retry do not accumulate dangling containers.
 func (p *PostgresProvider) startOnce(ctx context.Context, networkName string) (domain.ContainerCoords, error) {
 	req := testcontainers.ContainerRequest{
-		Image:        postgresImage,
+		Image:        p.image,
 		ExposedPorts: []string{"5432/tcp"},
 		Env: map[string]string{
 			"POSTGRES_DB":       throwawayDB,

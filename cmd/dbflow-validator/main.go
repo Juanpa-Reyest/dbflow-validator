@@ -35,8 +35,8 @@ import (
 	"github.com/dbflow-validator/dbflow-validator/internal/overlay"
 	"github.com/dbflow-validator/dbflow-validator/internal/preflight"
 	"github.com/dbflow-validator/dbflow-validator/internal/report"
-	"github.com/dbflow-validator/dbflow-validator/internal/rundir"
 	"github.com/dbflow-validator/dbflow-validator/internal/rulesvalidator"
+	"github.com/dbflow-validator/dbflow-validator/internal/rundir"
 )
 
 // buildVersion is injected at link time via -ldflags "-X main.buildVersion=<version>".
@@ -44,27 +44,49 @@ import (
 // Falls back to "dev" when not set (go run / go test without ldflags).
 var buildVersion = "dev"
 
+// buildPostgresImage is the default ephemeral Postgres image, injected at link
+// time via -ldflags "-X main.buildPostgresImage=<image>". It lets a build target
+// a specific image (e.g. one bundling pg_partman) so the tool runs with NO flags.
+// The --postgres-image flag and DBFLOW_POSTGRES_IMAGE env still override it.
+// Falls back to postgres:17.4 when not set, preserving the stock default.
+var buildPostgresImage = "postgres:17.4"
+
+// defaultingEnv wraps an env lookup so DBFLOW_POSTGRES_IMAGE falls back to the
+// link-time buildPostgresImage when unset. An explicit env value is never
+// overridden, and the --postgres-image flag still takes precedence over env.
+func defaultingEnv(env func(string) string) func(string) string {
+	return func(key string) string {
+		v := env(key)
+		if v == "" && key == "DBFLOW_POSTGRES_IMAGE" {
+			return buildPostgresImage
+		}
+		return v
+	}
+}
+
 // usageText is the help text printed when --help / -h is requested.
 const usageText = `dbflow-validator — validate a PostgreSQL Maven DB archetype
 
 Usage:
   dbflow-validator --repo-url <url> [flags]
-  dbflow-validator              (interactive TTY: prompts for URL and token)
+  dbflow-validator              (interactive TTY: prompts for URL, base branch, and token)
 
 Flags:
   --repo-url      string   Git repository URL to clone and validate (required, or interactive)
-  --base-branch   string   Branch to validate (default: integration)
+  --base-branch   string   Branch to validate (required, or interactive)
   --sql-input     string   Path to local SQLInput directory (default: ./src/main/resources/SQLInput)
   --output-format string   Output format: console or json (default: console)
   --output-file   string   Path to write JSON output (optional)
   --log-level     string   Log verbosity: debug, info, warn, error (default: info)
   --output-dir    string   Directory for per-run artifact subdirectories (default: ./dbflow-validator-runs)
   --keep-workspace         Retain the ephemeral clone under <run>/workspace/ even on a PASSED run
+  --postgres-image string  Ephemeral Postgres container image (default: postgres:17.4; override for extra extensions such as pg_partman)
   --version / -v           Print version and exit
   --help / -h              Print this help and exit
 
 Environment variables:
-  DBFLOW_GIT_TOKEN   Git access token (alternative to interactive prompt; never logged)
+  DBFLOW_GIT_TOKEN      Git access token (alternative to interactive prompt; never logged)
+  DBFLOW_POSTGRES_IMAGE Ephemeral Postgres container image (alternative to --postgres-image)
 
 Examples:
   # Non-interactive (flags + env var):
@@ -84,7 +106,7 @@ Examples:
     --repo-url https://github.com/org/db-artifacts-myproject.git \
     --keep-workspace
 
-  # Interactive (TTY): prompts for URL and token when not provided:
+  # Interactive (TTY): prompts for URL, base branch, and token when not provided:
   dbflow-validator
 
 Run artifacts:
@@ -105,7 +127,7 @@ Exit codes:
 `
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Getenv))
+	os.Exit(run(os.Args[1:], defaultingEnv(os.Getenv)))
 }
 
 // run is the testable entry point. It returns the process exit code.
@@ -213,7 +235,7 @@ func runWithHelpOutput(args []string, env func(string) string, helpOut io.Writer
 	// Early failures (preflight, clone, engine-guard, overlay) never create a network.
 	// The NetworkFactory closure captures ctx so the network removal uses the same
 	// context as the run (cancelled on SIGINT/SIGTERM).
-	pgProvider := container.NewPostgresProvider()
+	pgProvider := container.NewPostgresProvider(cfg.PostgresImage)
 	dbEng, err := engine.ProviderFor(engine.EnginePostgres)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dbflow-validator: engine provider: %v\n", err)
@@ -382,7 +404,9 @@ type postgresDBProvider struct {
 	provider *container.PostgresProvider
 }
 
-func (p *postgresDBProvider) Image() string { return p.eng.Image() }
+// Image reports the actual container image being launched so the container-start
+// trace reflects the configured (possibly custom) image, not a hardcoded default.
+func (p *postgresDBProvider) Image() string { return p.provider.Image() }
 func (p *postgresDBProvider) ContainerProvider() domain.ContainerProvider {
 	return p.provider
 }
@@ -441,12 +465,12 @@ func hostUIDGID() (int, int) {
 //
 // Format for starting events (Done=false):
 //
-//	  ▸ preflight …
+//	▸ preflight …
 //
 // Format for completed events (Done=true):
 //
-//	  ▸ preflight … OK
-//	  ▸ clone … FAILED
+//	▸ preflight … OK
+//	▸ clone … FAILED
 //
 // These are plain fmt lines, not slog logfmt, so the console stays free of
 // "time=… level=… msg=…" noise during a run.
