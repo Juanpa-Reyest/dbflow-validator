@@ -6,6 +6,7 @@ package config
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/moby/term"
 
 	"github.com/dbflow-validator/dbflow-validator/internal/domain"
+	"github.com/dbflow-validator/dbflow-validator/internal/git"
 	"github.com/dbflow-validator/dbflow-validator/internal/giturl"
 )
 
@@ -27,6 +29,29 @@ const (
 	defaultOutputDir     = "dbflow-validator-runs"
 	defaultPostgresImage = "postgres:17.4"
 )
+
+// GitDetector abstracts auto-detection of repository URL and base branch from
+// the current git working directory. This seam allows tests to inject a fake
+// that does not depend on the real filesystem's git state.
+type GitDetector interface {
+	// DetectRemoteURL returns the origin remote URL of the cwd, or an error.
+	DetectRemoteURL(ctx context.Context) (string, error)
+	// DetectBaseBranch returns the inferred base branch, or an error.
+	DetectBaseBranch(ctx context.Context) (string, error)
+}
+
+// RealGitDetector uses live git commands to detect repo URL and base branch.
+type RealGitDetector struct{}
+
+// DetectRemoteURL delegates to git.DetectRemoteURL with the real exec.
+func (RealGitDetector) DetectRemoteURL(ctx context.Context) (string, error) {
+	return git.DetectRemoteURL(ctx, nil)
+}
+
+// DetectBaseBranch delegates to git.DetectBaseBranch with defaults.
+func (RealGitDetector) DetectBaseBranch(ctx context.Context) (string, error) {
+	return git.DetectBaseBranch(ctx, nil, nil)
+}
 
 // Config holds all resolved inputs for a validation run.
 type Config struct {
@@ -172,24 +197,27 @@ func (r *DefaultPromptReader) readTokenVisible() (domain.Secret, error) {
 //
 // This is a convenience wrapper around ResolveWithPrompter that passes a real
 // DefaultPromptReader when stdin is a TTY, or nil when it is not.
+// It also passes RealGitDetector for auto-detection of repo URL and base branch.
 func Resolve(args []string, env func(string) string) (Config, error) {
 	var prompter PromptReader
 	if term.IsTerminal(os.Stdin.Fd()) {
 		prompter = NewDefaultPromptReader()
 	}
-	return ResolveWithPrompter(args, env, prompter)
+	return ResolveWithPrompter(args, env, prompter, RealGitDetector{})
 }
 
 // ResolveWithPrompter parses args and env; when repo URL or token are missing it
-// falls back to prompter (if non-nil) to request them interactively.
-// Precedence: flag > env > prompt.
+// falls back to auto-detection (detector) and then to prompter (if non-nil).
+// Precedence: flag > auto-detect > prompt.
+//
+// Pass nil for detector to disable auto-detection (useful in tests).
 //
 // Returns an error when:
 //   - flag parsing fails
-//   - repo URL is missing and prompter is nil (non-TTY)
+//   - repo URL is missing and both detector and prompter are nil/fail (non-TTY)
 //   - DBFLOW_GIT_TOKEN is unset, prompter is nil, and there is no --repo-url flag
 //   - any prompt read fails
-func ResolveWithPrompter(args []string, env func(string) string, prompter PromptReader) (Config, error) {
+func ResolveWithPrompter(args []string, env func(string) string, prompter PromptReader, detector GitDetector) (Config, error) {
 	fs := flag.NewFlagSet("dbflow-validator", flag.ContinueOnError)
 
 	var (
@@ -226,34 +254,54 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 	flagSet := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) { flagSet[f.Name] = true })
 
-	// Resolve repo URL: flag > prompt.
+	// Resolve repo URL: flag > auto-detect > prompt.
 	// Defensively sanitize the flag value too — shell completion or copy-paste
 	// may inject ANSI sequences even in non-interactive mode.
 	repoURL = sanitizeRepoURL(repoURL)
 	if repoURL == "" {
-		if prompter == nil {
-			return Config{}, fmt.Errorf("--repo-url is required (or run interactively with a TTY)")
+		// Try auto-detection from the current git repository's origin remote.
+		if detector != nil {
+			if detected, err := detector.DetectRemoteURL(context.Background()); err == nil && detected != "" {
+				repoURL = detected
+				fmt.Fprintf(os.Stderr, "  Auto-detected repo: %s\n", repoURL)
+			}
 		}
-		url, err := prompter.ReadRepoURL()
-		if err != nil {
-			return Config{}, fmt.Errorf("interactive prompt for repo-url: %w", err)
+		// If auto-detect didn't yield a result, fall through to prompt.
+		if repoURL == "" {
+			if prompter == nil {
+				return Config{}, fmt.Errorf("--repo-url is required (auto-detection failed; or run interactively with a TTY)")
+			}
+			url, err := prompter.ReadRepoURL()
+			if err != nil {
+				return Config{}, fmt.Errorf("interactive prompt for repo-url: %w", err)
+			}
+			repoURL = url
 		}
-		repoURL = url
 	}
 
-	// Resolve base branch: flag > prompt.
+	// Resolve base branch: flag > auto-detect > prompt.
 	// Defensively sanitize the flag value too — shell completion or copy-paste
 	// may inject ANSI sequences even in non-interactive mode.
 	baseBranch = sanitizeBranch(baseBranch)
 	if baseBranch == "" {
-		if prompter == nil {
-			return Config{}, fmt.Errorf("--base-branch is required (or run interactively with a TTY)")
+		// Try auto-detection from the current branch's upstream or merge-base.
+		if detector != nil {
+			if detected, err := detector.DetectBaseBranch(context.Background()); err == nil && detected != "" {
+				baseBranch = detected
+				fmt.Fprintf(os.Stderr, "  Auto-detected base branch: %s\n", baseBranch)
+			}
 		}
-		branch, err := prompter.ReadBaseBranch()
-		if err != nil {
-			return Config{}, fmt.Errorf("interactive prompt for base-branch: %w", err)
+		// If auto-detect didn't yield a result, fall through to prompt.
+		if baseBranch == "" {
+			if prompter == nil {
+				return Config{}, fmt.Errorf("--base-branch is required (auto-detection failed; or run interactively with a TTY)")
+			}
+			branch, err := prompter.ReadBaseBranch()
+			if err != nil {
+				return Config{}, fmt.Errorf("interactive prompt for base-branch: %w", err)
+			}
+			baseBranch = branch
 		}
-		baseBranch = branch
 	}
 
 	// Resolve token: env > prompt.
