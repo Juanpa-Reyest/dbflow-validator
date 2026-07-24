@@ -1,16 +1,19 @@
 package maven
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	dockercontainer "github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -286,6 +289,19 @@ func (r *ContainerRunner) Run(
 		logs.Close()
 	}
 
+	// Copy the container's /work tree back onto the host clone so files GENERATED
+	// by this goal persist for the next goal. dbflow:sync writes the release tag
+	// artifacts (src/main/resources/.release/<tag>) and generated changelogs into
+	// /work; dbflow:rollback runs in a SEPARATE container that copies the host
+	// clone back in, so without this copy-out the sync-generated release tag is
+	// invisible to rollback and the developer's HU is never reverted.
+	// Best-effort: a copy-out failure is traced but must not mask the goal result.
+	if cid := c.GetContainerID(); cid != "" {
+		if err := copyWorkDirOut(ctx, cid, cloneRoot); err != nil {
+			fmt.Fprintf(mw, "[copy-out warning: %v]\n", err)
+		}
+	}
+
 	trace := capture.String()
 	elapsed := time.Since(start)
 
@@ -347,6 +363,98 @@ func MapContainerResult(
 	result.Status = domain.StepStatusPassed
 	result.Trace = trace
 	return result
+}
+
+// copyWorkDirOut copies the container's /work/<Base(cloneRoot)> directory back
+// onto the host clone at cloneRoot, overwriting files with what the Maven goal
+// generated inside the container. It works on a stopped container (like
+// `docker cp`). Uses the Docker API's CopyFromContainer, which returns a tar
+// stream rooted at the source directory's basename, so untarring into the
+// parent of cloneRoot reconstructs cloneRoot exactly.
+func copyWorkDirOut(ctx context.Context, containerID, cloneRoot string) error {
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		return fmt.Errorf("docker client: %w", err)
+	}
+	defer cli.Close()
+
+	srcPath := "/work/" + filepath.Base(cloneRoot)
+	res, err := cli.CopyFromContainer(ctx, containerID, client.CopyFromContainerOptions{SourcePath: srcPath})
+	if err != nil {
+		return fmt.Errorf("copy %s from container: %w", srcPath, err)
+	}
+	defer res.Content.Close()
+
+	// Tar entries are prefixed with Base(cloneRoot); untar into the parent so
+	// they land back at cloneRoot.
+	return untarInto(res.Content, filepath.Dir(cloneRoot))
+}
+
+// untarInto extracts a tar stream into dest, overwriting existing files.
+// It handles directories, regular files, and symlinks, and guards against
+// path-traversal entries that would escape dest.
+func untarInto(r io.Reader, dest string) error {
+	cleanDest := filepath.Clean(dest)
+	tr := tar.NewReader(r)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read tar: %w", err)
+		}
+
+		// Skip the .git directory: it is unchanged git metadata and its packed
+		// objects are read-only (0444), which would fail the overwrite and abort
+		// the whole copy-out before the sync-generated files are restored. The
+		// rollback goal does not need git metadata.
+		gitEntry := false
+		for _, part := range strings.Split(hdr.Name, "/") {
+			if part == ".git" {
+				gitEntry = true
+				break
+			}
+		}
+		if gitEntry {
+			continue
+		}
+
+		target := filepath.Join(cleanDest, hdr.Name)
+		// Reject entries that would escape dest (path traversal).
+		if target != cleanDest && !strings.HasPrefix(target, cleanDest+string(os.PathSeparator)) {
+			continue
+		}
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return fmt.Errorf("mkdir %s: %w", target, err)
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return fmt.Errorf("mkdir parent of %s: %w", target, err)
+			}
+			// Remove any existing target first: git-tracked files may be read-only,
+			// which would make an in-place O_WRONLY open fail with permission denied.
+			// Removing then recreating works as long as the parent dir is writable.
+			_ = os.Remove(target)
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(hdr.Mode)&0o777)
+			if err != nil {
+				return fmt.Errorf("open %s: %w", target, err)
+			}
+			if _, err := io.Copy(f, tr); err != nil { //nolint:gosec // trusted local container output
+				f.Close()
+				return fmt.Errorf("write %s: %w", target, err)
+			}
+			f.Close()
+		case tar.TypeSymlink:
+			_ = os.Remove(target)
+			_ = os.Symlink(hdr.Linkname, target)
+		default:
+			// Skip other entry types (devices, fifos, etc.) — not expected in /work.
+		}
+	}
 }
 
 // Ensure ContainerRunner satisfies domain.MavenRunner at compile time.
