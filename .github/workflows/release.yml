@@ -83,7 +83,7 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum dbflow-validator-linux-amd64 dbflow-validator-darwin-amd64 dbflow-validator-darwin-arm64 dbflow-validator-windows-amd64.exe > SHA256SUMS.txt
+        run: sha256sum dbflow-validator-linux-amd64 dbflow-validator-darwin-amd64 dbflow-validator-darwin-arm64 dbflow-validator-windows-amd64.exe dbflow-validator-ext-linux-amd64 dbflow-validator-ext-darwin-amd64 dbflow-validator-ext-darwin-arm64 dbflow-validator-ext-windows-amd64.exe > SHA256SUMS.txt
 
       - name: Create the GitHub Release
         env:
@@ -101,6 +101,10 @@ jobs:
             dist/dbflow-validator-darwin-amd64 \
             dist/dbflow-validator-darwin-arm64 \
             dist/dbflow-validator-windows-amd64.exe \
+            dist/dbflow-validator-ext-linux-amd64 \
+            dist/dbflow-validator-ext-darwin-amd64 \
+            dist/dbflow-validator-ext-darwin-arm64 \
+            dist/dbflow-validator-ext-windows-amd64.exe \
             dist/SHA256SUMS.txt \
             --title "$VERSION" \
             --notes-file /tmp/release-notes.md \

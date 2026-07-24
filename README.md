@@ -189,12 +189,14 @@ Run `dbflow-validator --help` for the full list any time.
 | `--log-level` | `info` | `debug`, `info`, `warn`, `error` |
 | `--output-dir` | `./dbflow-validator-runs` | Directory for per-run artifact subdirectories |
 | `--keep-workspace` | `false` | Retain the ephemeral clone under `<run>/workspace/` even on a PASSED run |
+| `--postgres-image` | `postgres:17.4` | Ephemeral Postgres container image. Override to supply an image with extra extensions (e.g. `pg_partman`). |
 | `--version`, `-v` | — | Print the version and exit |
 | `--help`, `-h` | — | Print help and exit |
 
 | Environment variable | Description |
 |----------------------|-------------|
 | `DBFLOW_GIT_TOKEN` | Git access token for HTTPS URLs (instead of the interactive prompt; never logged). Not needed for SSH URLs. |
+| `DBFLOW_POSTGRES_IMAGE` | Ephemeral Postgres container image (alternative to `--postgres-image`). Lets you supply an image with extra extensions (e.g. `pg_partman`). |
 
 ### Run artifacts
 

@@ -264,9 +264,9 @@ func TestResolveWithPrompter(t *testing.T) {
 			errContains: "repo-url",
 		},
 		{
-			name: "--sql-input omitted defaults to absolute cwd/src/main/resources/SQLInput",
-			args: []string{"--repo-url", "https://host/repo.git"},
-			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			name:     "--sql-input omitted defaults to absolute cwd/src/main/resources/SQLInput",
+			args:     []string{"--repo-url", "https://host/repo.git"},
+			env:      map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
 			prompter: &mockPromptReader{branch: "main"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
@@ -279,9 +279,9 @@ func TestResolveWithPrompter(t *testing.T) {
 			},
 		},
 		{
-			name: "--sql-input explicit path used as-is",
-			args: []string{"--repo-url", "https://host/repo.git", "--sql-input", "/custom/SQLInput"},
-			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			name:     "--sql-input explicit path used as-is",
+			args:     []string{"--repo-url", "https://host/repo.git", "--sql-input", "/custom/SQLInput"},
+			env:      map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
 			prompter: &mockPromptReader{branch: "main"},
 			check: func(t *testing.T, cfg config.Config) {
 				t.Helper()
@@ -396,6 +396,58 @@ func TestResolve_OutputDirAndKeepWorkspace(t *testing.T) {
 				t.Fatalf("Resolve() unexpected error: %v", err)
 			}
 			tt.check(t, cfg)
+		})
+	}
+}
+
+// TestResolve_PostgresImage verifies the --postgres-image flag and the
+// DBFLOW_POSTGRES_IMAGE env var resolve with precedence flag > env > default.
+func TestResolve_PostgresImage(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "default is postgres:17.4 when neither flag nor env set",
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main"},
+			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			want: "postgres:17.4",
+		},
+		{
+			name: "--postgres-image flag is respected",
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main", "--postgres-image", "custom:tag"},
+			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
+			want: "custom:tag",
+		},
+		{
+			name: "DBFLOW_POSTGRES_IMAGE env is respected when flag omitted",
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main"},
+			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok", "DBFLOW_POSTGRES_IMAGE": "envregistry/pg:17"},
+			want: "envregistry/pg:17",
+		},
+		{
+			name: "explicit flag overrides env",
+			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main", "--postgres-image", "flag:wins"},
+			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok", "DBFLOW_POSTGRES_IMAGE": "env:loses"},
+			want: "flag:wins",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := func(key string) string { return tt.env[key] }
+			cfg, err := config.ResolveWithPrompter(tt.args, env, nil)
+			if err != nil {
+				t.Fatalf("ResolveWithPrompter() unexpected error: %v", err)
+			}
+			if cfg.PostgresImage != tt.want {
+				t.Errorf("PostgresImage: got %q, want %q", cfg.PostgresImage, tt.want)
+			}
+			if !strings.Contains(cfg.String(), "PostgresImage") {
+				t.Errorf("String() should contain PostgresImage, got %q", cfg.String())
+			}
 		})
 	}
 }

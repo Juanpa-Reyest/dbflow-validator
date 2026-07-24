@@ -39,6 +39,19 @@ func sanitizeBranch(raw string) string {
 	})
 }
 
+// sanitizeImage strips ANSI escape sequences, then trims surrounding
+// whitespace and non-printable control characters from a container image
+// reference read from a flag or environment variable.
+//
+// Like sanitizeBranch, this defends against stray terminal escape codes or
+// copy-paste artifacts corrupting the image passed to Docker.
+func sanitizeImage(raw string) string {
+	cleaned := ansiEscape.ReplaceAllString(raw, "")
+	return strings.TrimFunc(cleaned, func(r rune) bool {
+		return unicode.IsSpace(r) || (r < 0x20 && r != '\t') || r == 0x7f
+	})
+}
+
 // sanitizeToken trims surrounding whitespace and non-printable control
 // characters from a token string. Interior characters are NOT altered —
 // tokens may legitimately contain hyphens, underscores, and mixed case

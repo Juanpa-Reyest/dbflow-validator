@@ -19,17 +19,19 @@ import (
 )
 
 const (
-	tokenEnvVar      = "DBFLOW_GIT_TOKEN"
-	defaultFormat    = "console"
-	defaultLogLvl    = "info"
-	defaultSQLInput  = "src/main/resources/SQLInput"
-	defaultOutputDir = "dbflow-validator-runs"
+	tokenEnvVar          = "DBFLOW_GIT_TOKEN"
+	postgresImageEnvVar  = "DBFLOW_POSTGRES_IMAGE"
+	defaultFormat        = "console"
+	defaultLogLvl        = "info"
+	defaultSQLInput      = "src/main/resources/SQLInput"
+	defaultOutputDir     = "dbflow-validator-runs"
+	defaultPostgresImage = "postgres:17.4"
 )
 
 // Config holds all resolved inputs for a validation run.
 type Config struct {
-	RepoURL      string
-	BaseBranch   string
+	RepoURL    string
+	BaseBranch string
 	// SQLInputPath is the absolute path to the developer's local SQLInput directory.
 	// Resolved from the --sql-input flag (or its default) at parse time using os.Getwd().
 	SQLInputPath string
@@ -45,13 +47,17 @@ type Config struct {
 	// KeepWorkspace, when true, retains the ephemeral clone under <run>/workspace/
 	// even on a PASSED run. Normally the clone is removed on success.
 	KeepWorkspace bool
+	// PostgresImage is the ephemeral Postgres container image to launch. Defaults to
+	// defaultPostgresImage; override it to supply an image with extra extensions
+	// (e.g. pg_partman). Resolved from --postgres-image or DBFLOW_POSTGRES_IMAGE.
+	PostgresImage string
 }
 
 // String returns a human-readable representation that NEVER includes the token value.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{RepoURL:%q BaseBranch:%q SQLInputPath:%q OutputFormat:%q OutputFile:%q LogLevel:%q Token:%s OutputDir:%q KeepWorkspace:%v}",
-		c.RepoURL, c.BaseBranch, c.SQLInputPath, c.OutputFormat, c.OutputFile, c.LogLevel, c.Token, c.OutputDir, c.KeepWorkspace,
+		"Config{RepoURL:%q BaseBranch:%q SQLInputPath:%q OutputFormat:%q OutputFile:%q LogLevel:%q Token:%s OutputDir:%q KeepWorkspace:%v PostgresImage:%q}",
+		c.RepoURL, c.BaseBranch, c.SQLInputPath, c.OutputFormat, c.OutputFile, c.LogLevel, c.Token, c.OutputDir, c.KeepWorkspace, c.PostgresImage,
 	)
 }
 
@@ -195,6 +201,7 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 		logLevel      string
 		outputDir     string
 		keepWorkspace bool
+		postgresImage string
 	)
 
 	fs.StringVar(&repoURL, "repo-url", "", "Repository URL to clone and validate")
@@ -205,6 +212,7 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 	fs.StringVar(&logLevel, "log-level", defaultLogLvl, "Log level: debug, info, warn, error (default: info)")
 	fs.StringVar(&outputDir, "output-dir", "", "Directory for per-run artifact subdirectories (default: ./dbflow-validator-runs)")
 	fs.BoolVar(&keepWorkspace, "keep-workspace", false, "Retain the ephemeral clone under <run>/workspace/ even on a PASSED run")
+	fs.StringVar(&postgresImage, "postgres-image", defaultPostgresImage, "Ephemeral Postgres container image (default: postgres:17.4; override for extra extensions such as pg_partman)")
 
 	// Discard usage output; callers handle errors themselves.
 	var usageBuf strings.Builder
@@ -213,6 +221,10 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 	if err := fs.Parse(args); err != nil {
 		return Config{}, fmt.Errorf("flag parse: %w", err)
 	}
+
+	// Track which flags were explicitly provided so env vars only fill in defaults.
+	flagSet := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { flagSet[f.Name] = true })
 
 	// Resolve repo URL: flag > prompt.
 	// Defensively sanitize the flag value too — shell completion or copy-paste
@@ -296,6 +308,19 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 		resolvedOutputDir = filepath.Join(cwd, resolvedOutputDir)
 	}
 
+	// Resolve Postgres image: explicit flag > env > default.
+	// The flag defaults to defaultPostgresImage, so DBFLOW_POSTGRES_IMAGE is only
+	// consulted when the flag was left at its default (not explicitly provided).
+	postgresImage = sanitizeImage(postgresImage)
+	if !flagSet["postgres-image"] {
+		if envImage := sanitizeImage(env(postgresImageEnvVar)); envImage != "" {
+			postgresImage = envImage
+		}
+	}
+	if postgresImage == "" {
+		postgresImage = defaultPostgresImage
+	}
+
 	return Config{
 		RepoURL:       repoURL,
 		BaseBranch:    baseBranch,
@@ -306,5 +331,6 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 		Token:         token,
 		OutputDir:     resolvedOutputDir,
 		KeepWorkspace: keepWorkspace,
+		PostgresImage: postgresImage,
 	}, nil
 }
