@@ -301,6 +301,22 @@ func Run(ctx context.Context, deps Deps, cfg config.Config) domain.RunReport {
 	// All exit paths (success, failure, early exit) must call this instead of
 	// buildReport directly to guarantee the cleanup step is always included.
 	appendCleanupAndBuild := func() domain.RunReport {
+		// Copy the HTML script report from the clone into <runDir>/script-report/
+		// BEFORE cleanup removes the workspace. Tolerant to missing source dir.
+		if cs.cloneRoot != "" && deps.RunDir != "" {
+			srcReport := filepath.Join(cs.cloneRoot, "src", "main", "resources", "Validator", "outputReport", "report")
+			dstReport := filepath.Join(deps.RunDir, "script-report")
+			if info, err := os.Stat(srcReport); err == nil && info.IsDir() {
+				if cpErr := copyDir(srcReport, dstReport); cpErr != nil {
+					log.Warn("failed to copy script report", "src", srcReport, "dst", dstReport, "err", cpErr)
+				} else {
+					log.Info("script report copied", "dst", dstReport)
+				}
+			} else {
+				log.Warn("script report source not found, skipping copy", "path", srcReport)
+			}
+		}
+
 		notify(deps, "cleanup", false, false)
 		cleanupStep := runCleanupStep(reg, cs, started)
 		notify(deps, "cleanup", true, cleanupStep.Status != domain.StepStatusPassed)
