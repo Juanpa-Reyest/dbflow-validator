@@ -48,8 +48,8 @@ var buildVersion = "dev"
 // time via -ldflags "-X main.buildPostgresImage=<image>". It lets a build target
 // a specific image (e.g. one bundling pg_partman) so the tool runs with NO flags.
 // The --postgres-image flag and DBFLOW_POSTGRES_IMAGE env still override it.
-// Falls back to postgres:17.4 when not set, preserving the stock default.
-var buildPostgresImage = "postgres:17.4"
+// Falls back to ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7 when not set, preserving the stock default.
+var buildPostgresImage = "ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7"
 
 // defaultingEnv wraps an env lookup so DBFLOW_POSTGRES_IMAGE falls back to the
 // link-time buildPostgresImage when unset. An explicit env value is never
@@ -80,7 +80,7 @@ Flags:
   --log-level     string   Log verbosity: debug, info, warn, error (default: info)
   --output-dir    string   Directory for per-run artifact subdirectories (default: ./dbflow-validator-runs)
   --keep-workspace         Retain the ephemeral clone under <run>/workspace/ even on a PASSED run
-  --postgres-image string  Ephemeral Postgres container image (default: postgres:17.4; override for extra extensions such as pg_partman)
+  --postgres-image string  Ephemeral Postgres container image (default: ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7; override for extra extensions such as pg_partman)
   --version / -v           Print version and exit
   --help / -h              Print this help and exit
 

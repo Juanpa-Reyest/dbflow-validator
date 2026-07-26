@@ -262,8 +262,8 @@ func TestStepTrace_Overlay_ContainsCopiedCount(t *testing.T) {
 func TestStepTrace_ContainerStart_ContainsImage(t *testing.T) {
 	rpt := makeStepTraceReport(t)
 	s := findStep(t, rpt, "container-start")
-	if !strings.Contains(s.Trace, "postgres:17.4") {
-		t.Errorf("container-start trace missing image 'postgres:17.4'; trace:\n%s", s.Trace)
+	if !strings.Contains(s.Trace, "ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7") {
+		t.Errorf("container-start trace missing image 'ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7'; trace:\n%s", s.Trace)
 	}
 }
 

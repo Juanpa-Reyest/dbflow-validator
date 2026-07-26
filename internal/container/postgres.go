@@ -27,7 +27,7 @@ type postgresStarterFn func(ctx context.Context, networkName string) (domain.Con
 const (
 	// defaultPostgresImage is the fallback image used when no image is configured.
 	// Keeping it as the default preserves byte-identical behavior for existing users.
-	defaultPostgresImage = "postgres:17.4"
+	defaultPostgresImage = "ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7"
 	throwawayDB          = "validatordb"
 	throwawayUser        = "validator"
 	throwawayPass        = "v4lid4t0r_pass"
@@ -157,7 +157,7 @@ func (p *PostgresProvider) StartWithStarter(ctx context.Context, networkName str
 	return coords, nil
 }
 
-// Start launches an ephemeral postgres:17.4 container on a random free host port
+// Start launches an ephemeral ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7 container on a random free host port
 // and waits until Postgres logs that it is ready to accept connections.
 //
 // networkName is the Docker network to join; pass "" for host-only networking.

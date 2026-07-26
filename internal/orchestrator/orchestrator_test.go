@@ -84,7 +84,7 @@ type fakeDatabaseProvider struct {
 	pingErr  error
 }
 
-func (f *fakeDatabaseProvider) Image() string                                      { return "postgres:17.4" }
+func (f *fakeDatabaseProvider) Image() string                                      { return "ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7" }
 func (f *fakeDatabaseProvider) ContainerProvider() domain.ContainerProvider        { return f.provider }
 func (f *fakeDatabaseProvider) DSN(coords domain.ContainerCoords) string           { return "postgres://fake" }
 func (f *fakeDatabaseProvider) Ping(_ context.Context, _ string) error             { return f.pingErr }

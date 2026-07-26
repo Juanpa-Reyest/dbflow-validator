@@ -179,16 +179,16 @@ func TestResolveValidatorJarWith_Success_ReturnsPath(t *testing.T) {
 	}
 }
 
-// TestVersion_Is020 asserts that the VERSION file in the repo root contains exactly
-// "0.2.0" — the release version for the configurable Postgres image + -ext editions.
-func TestVersion_Is020(t *testing.T) {
+// TestVersion_Is031 asserts that the VERSION file in the repo root contains exactly
+// "0.3.1" — the release version with custom postgres image default.
+func TestVersion_Is031(t *testing.T) {
 	data, err := os.ReadFile("../../VERSION")
 	if err != nil {
 		t.Fatalf("read VERSION file: %v", err)
 	}
 	got := strings.TrimSpace(string(data))
-	if got != "0.2.0" {
-		t.Errorf("VERSION = %q, want \"0.2.0\"", got)
+	if got != "0.3.1" {
+		t.Errorf("VERSION = %q, want \"0.3.1\"", got)
 	}
 }
 

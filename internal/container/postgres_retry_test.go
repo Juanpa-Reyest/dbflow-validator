@@ -23,7 +23,7 @@ func TestStartWithStarter_Retry(t *testing.T) {
 			return want, nil
 		}
 
-		p := container.NewPostgresProvider("postgres:17.4")
+		p := container.NewPostgresProvider("ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7")
 		got, err := p.StartWithStarter(context.Background(), "net-name", starter, 0)
 		if err != nil {
 			t.Fatalf("expected no error, got: %v", err)
@@ -47,7 +47,7 @@ func TestStartWithStarter_Retry(t *testing.T) {
 			return want, nil
 		}
 
-		p := container.NewPostgresProvider("postgres:17.4")
+		p := container.NewPostgresProvider("ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7")
 		got, err := p.StartWithStarter(context.Background(), "net-name", starter, 0)
 		if err != nil {
 			t.Fatalf("expected no error after retry, got: %v", err)
@@ -68,7 +68,7 @@ func TestStartWithStarter_Retry(t *testing.T) {
 			return domain.ContainerCoords{}, sentinel
 		}
 
-		p := container.NewPostgresProvider("postgres:17.4")
+		p := container.NewPostgresProvider("ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7")
 		_, err := p.StartWithStarter(context.Background(), "net-name", starter, 0)
 		if !errors.Is(err, sentinel) {
 			t.Fatalf("expected sentinel error, got: %v", err)
@@ -89,7 +89,7 @@ func TestStartWithStarter_Retry(t *testing.T) {
 			return domain.ContainerCoords{Host: "localhost", Port: 5432}, nil
 		}
 
-		p := container.NewPostgresProvider("postgres:17.4")
+		p := container.NewPostgresProvider("ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7")
 		_, err := p.StartWithStarter(ctx, "net-name", starter, 0)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("expected context.Canceled, got: %v", err)

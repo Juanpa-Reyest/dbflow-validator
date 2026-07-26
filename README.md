@@ -90,7 +90,16 @@ There's no setup wizard: you run the file, it asks for your repo, and it validat
 
 ## What it asks you
 
-When you run it with no options, it prompts for the repository URL and the base branch.
+When you run it with no options **from within your archetype repository**, it
+auto-detects both the repository URL and the base branch — **zero prompts needed**:
+
+```
+  Auto-detected repo: git@github.com:your-org/your-archetype.git
+  Auto-detected base branch: integration
+```
+
+If auto-detection fails (e.g. you're not inside a git repo), it falls back to
+prompting for the repository URL and the base branch.
 If the URL is HTTPS it also prompts for an access token:
 
 ```
@@ -98,6 +107,10 @@ Repository URL:        https://github.com/your-org/your-archetype.git
 Base branch:           integration
 Git access token (hidden):
 ```
+
+**How auto-detection works:**
+- **Repo URL**: reads `git remote get-url origin` from the current directory.
+- **Base branch**: checks the tracking upstream of the current branch (e.g. if you branched from `prod`, it detects `prod`). If no upstream is configured, it uses a merge-base heuristic against common long-lived branches (`main`, `master`, `integration`, `prod`, `qa`, `uat`).
 
 The token is typed hidden and is **never** written to disk, logs, or anywhere — it's only used to clone.
 

@@ -134,7 +134,10 @@ func TestResolve(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			env := func(key string) string { return tt.env[key] }
-			cfg, err := config.Resolve(tt.args, env)
+			// Use ResolveWithPrompter with nil prompter AND nil detector to test
+			// the non-interactive, no-auto-detect path in isolation (avoids
+			// interference from the real git repo the test runs inside).
+			cfg, err := config.ResolveWithPrompter(tt.args, env, nil, nil)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Resolve() error = %v, wantErr = %v", err, tt.wantErr)
 			}
@@ -299,7 +302,7 @@ func TestResolveWithPrompter(t *testing.T) {
 			if tt.prompter != nil {
 				prompter = tt.prompter
 			}
-			cfg, err := config.ResolveWithPrompter(tt.args, env, prompter)
+			cfg, err := config.ResolveWithPrompter(tt.args, env, prompter, nil)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ResolveWithPrompter() error = %v, wantErr = %v", err, tt.wantErr)
 			}
@@ -410,10 +413,10 @@ func TestResolve_PostgresImage(t *testing.T) {
 		want string
 	}{
 		{
-			name: "default is postgres:17.4 when neither flag nor env set",
+			name: "default is ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7 when neither flag nor env set",
 			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main"},
 			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
-			want: "postgres:17.4",
+			want: "ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7",
 		},
 		{
 			name: "--postgres-image flag is respected",
@@ -438,7 +441,7 @@ func TestResolve_PostgresImage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			env := func(key string) string { return tt.env[key] }
-			cfg, err := config.ResolveWithPrompter(tt.args, env, nil)
+			cfg, err := config.ResolveWithPrompter(tt.args, env, nil, nil)
 			if err != nil {
 				t.Fatalf("ResolveWithPrompter() unexpected error: %v", err)
 			}
@@ -460,6 +463,7 @@ func TestResolveSSH(t *testing.T) {
 			[]string{"--repo-url", "git@github.com:org/repo.git"},
 			func(string) string { return "" }, // no env token
 			mock,
+			nil,
 		)
 		if err != nil {
 			t.Fatalf("unexpected error for SSH URL: %v", err)
@@ -481,6 +485,7 @@ func TestResolveSSH(t *testing.T) {
 			[]string{"--repo-url", "ssh://git@github.com/org/repo.git"},
 			func(string) string { return "" },
 			mock,
+			nil,
 		)
 		if err != nil {
 			t.Fatalf("unexpected error for ssh:// URL: %v", err)
@@ -499,6 +504,7 @@ func TestResolveSSH(t *testing.T) {
 			[]string{}, // no flags — falls through to prompt
 			func(string) string { return "" },
 			mock,
+			nil,
 		)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -522,6 +528,7 @@ func TestResolveSSH(t *testing.T) {
 				return ""
 			},
 			mock,
+			nil,
 		)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -535,6 +542,7 @@ func TestResolveSSH(t *testing.T) {
 			[]string{"--repo-url", "https://github.com/org/repo.git", "--base-branch", "main"},
 			func(string) string { return "" },
 			nil, // no prompter — non-TTY
+			nil,
 		)
 		if err == nil {
 			t.Fatal("expected error for HTTPS URL with no token and no prompter")
@@ -548,6 +556,7 @@ func TestResolveSSH(t *testing.T) {
 		_, err := config.ResolveWithPrompter(
 			[]string{"--repo-url", "https://github.com/org/repo.git", "--base-branch", "main"},
 			func(string) string { return "" },
+			nil,
 			nil,
 		)
 		if err == nil {
