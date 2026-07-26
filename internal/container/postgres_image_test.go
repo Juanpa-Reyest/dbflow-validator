@@ -15,8 +15,8 @@ func TestNewPostgresProvider_Image(t *testing.T) {
 		want  string
 	}{
 		{name: "custom image is preserved", image: "myregistry/postgres-partman:17", want: "myregistry/postgres-partman:17"},
-		{name: "explicit default", image: "postgres:17.4", want: "postgres:17.4"},
-		{name: "empty falls back to default", image: "", want: "postgres:17.4"},
+		{name: "explicit default", image: "ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7", want: "ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7"},
+		{name: "empty falls back to default", image: "", want: "ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -89,7 +89,7 @@ func TestEndToEnd_HappyPath(t *testing.T) {
 
 	// Wire real adapters.
 	// PostgresProvider receives the network name at Start time (lazy); no network name at construction.
-	pgContainerProvider := container.NewPostgresProvider("postgres:17.4")
+	pgContainerProvider := container.NewPostgresProvider("ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7")
 	dbEng, err := engine.ProviderFor(engine.EnginePostgres)
 	if err != nil {
 		t.Fatalf("engine provider: %v", err)

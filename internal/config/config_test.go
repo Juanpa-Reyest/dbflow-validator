@@ -413,10 +413,10 @@ func TestResolve_PostgresImage(t *testing.T) {
 		want string
 	}{
 		{
-			name: "default is postgres:17.4 when neither flag nor env set",
+			name: "default is ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7 when neither flag nor env set",
 			args: []string{"--repo-url", "https://host/repo.git", "--base-branch", "main"},
 			env:  map[string]string{"DBFLOW_GIT_TOKEN": "tok"},
-			want: "postgres:17.4",
+			want: "ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7",
 		},
 		{
 			name: "--postgres-image flag is respected",

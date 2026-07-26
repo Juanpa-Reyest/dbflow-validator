@@ -27,7 +27,7 @@ const (
 	defaultLogLvl        = "info"
 	defaultSQLInput      = "src/main/resources/SQLInput"
 	defaultOutputDir     = "dbflow-validator-runs"
-	defaultPostgresImage = "postgres:17.4"
+	defaultPostgresImage = "ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7"
 )
 
 // GitDetector abstracts auto-detection of repository URL and base branch from
@@ -240,7 +240,7 @@ func ResolveWithPrompter(args []string, env func(string) string, prompter Prompt
 	fs.StringVar(&logLevel, "log-level", defaultLogLvl, "Log level: debug, info, warn, error (default: info)")
 	fs.StringVar(&outputDir, "output-dir", "", "Directory for per-run artifact subdirectories (default: ./dbflow-validator-runs)")
 	fs.BoolVar(&keepWorkspace, "keep-workspace", false, "Retain the ephemeral clone under <run>/workspace/ even on a PASSED run")
-	fs.StringVar(&postgresImage, "postgres-image", defaultPostgresImage, "Ephemeral Postgres container image (default: postgres:17.4; override for extra extensions such as pg_partman)")
+	fs.StringVar(&postgresImage, "postgres-image", defaultPostgresImage, "Ephemeral Postgres container image (default: ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7; override for extra extensions such as pg_partman)")
 
 	// Discard usage output; callers handle errors themselves.
 	var usageBuf strings.Builder

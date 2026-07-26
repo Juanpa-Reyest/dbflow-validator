@@ -179,16 +179,16 @@ func TestResolveValidatorJarWith_Success_ReturnsPath(t *testing.T) {
 	}
 }
 
-// TestVersion_Is030 asserts that the VERSION file in the repo root contains exactly
-// "0.3.0" — the release version with auto-detection of repo URL and base branch.
-func TestVersion_Is030(t *testing.T) {
+// TestVersion_Is031 asserts that the VERSION file in the repo root contains exactly
+// "0.3.1" — the release version with custom postgres image default.
+func TestVersion_Is031(t *testing.T) {
 	data, err := os.ReadFile("../../VERSION")
 	if err != nil {
 		t.Fatalf("read VERSION file: %v", err)
 	}
 	got := strings.TrimSpace(string(data))
-	if got != "0.3.0" {
-		t.Errorf("VERSION = %q, want \"0.3.0\"", got)
+	if got != "0.3.1" {
+		t.Errorf("VERSION = %q, want \"0.3.1\"", got)
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	postgresImage = "postgres:17.4"
+	postgresImage = "ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7"
 )
 
 // postgresProvider implements domain.DatabaseProvider for PostgreSQL.

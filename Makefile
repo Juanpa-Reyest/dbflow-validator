@@ -18,11 +18,11 @@
 
 VERSION      ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 # POSTGRES_IMAGE is the ephemeral Postgres image baked in as the no-flag default.
-# Default postgres:17.4 (stock). Override to ship an area-specific build whose
+# Default ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7 (with pg_partman). Override to ship an area-specific build whose
 # `dbflow-validator` (no flags) uses an image with extra extensions, e.g.:
 #   POSTGRES_IMAGE=dbflow-postgres-partman:17.7 make build
 # The --postgres-image flag and DBFLOW_POSTGRES_IMAGE env still override at runtime.
-POSTGRES_IMAGE ?= postgres:17.4
+POSTGRES_IMAGE ?= ghcr.io/juanpa-reyest/dbflow-postgres-partman:17.7
 BINARY       := dbflow-validator
 PKG          := github.com/dbflow-validator/dbflow-validator/cmd/dbflow-validator
 LDFLAGS      := -X main.buildVersion=$(VERSION) -X main.buildPostgresImage=$(POSTGRES_IMAGE) -s -w
